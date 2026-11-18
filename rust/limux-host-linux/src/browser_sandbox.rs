@@ -2,6 +2,8 @@
 
 #[cfg(feature = "webkit")]
 mod probe;
+#[cfg(feature = "webkit")]
+mod renderer;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BrowserSandbox {
@@ -11,7 +13,19 @@ pub(crate) struct BrowserSandbox {
 #[cfg(feature = "webkit")]
 pub(crate) fn availability() -> &'static Result<BrowserSandbox, String> {
     static RESULT: std::sync::OnceLock<Result<BrowserSandbox, String>> = std::sync::OnceLock::new();
-    RESULT.get_or_init(probe::check)
+    RESULT.get_or_init(|| renderer::check(&probe::check_with))
+}
+
+/// An environment variable shells started by Limux get, undoing a WebKit
+/// setting the browser check made for Limux itself.
+#[cfg(feature = "webkit")]
+pub(crate) fn terminal_child_env() -> Option<(String, String)> {
+    renderer::terminal_child_env()
+}
+
+#[cfg(not(feature = "webkit"))]
+pub(crate) fn terminal_child_env() -> Option<(String, String)> {
+    None
 }
 
 #[cfg(not(feature = "webkit"))]

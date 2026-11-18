@@ -205,7 +205,15 @@ fn drain_stderr(stderr: &mut Option<ChildStderr>, output: &mut Vec<u8>) {
     }
 }
 
-pub(super) fn check() -> Result<BrowserSandbox, String> {
+/// The host goes through `renderer::check`; the tests below check directly.
+#[cfg(test)]
+fn check() -> Result<BrowserSandbox, String> {
+    check_with(&[])
+}
+
+/// `check`, with `env` added to the environment of the check and the WebKit
+/// it starts.
+pub(super) fn check_with(env: &[(&str, &str)]) -> Result<BrowserSandbox, String> {
     require_prepared_runtime()?;
     let signal_lock = HOST_SIGNAL_LOCK
         .lock()
@@ -225,6 +233,7 @@ pub(super) fn check() -> Result<BrowserSandbox, String> {
     let expected_ppid = unsafe { libc::getpid() };
     let mut command = own_command(false, None)?;
     command
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

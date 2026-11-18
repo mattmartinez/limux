@@ -191,6 +191,7 @@ pub(crate) fn terminal_child_environment_overrides() -> Vec<(String, String)> {
             };
             ((*target).to_string(), value)
         })
+        .chain(browser_sandbox::terminal_child_env())
         .collect()
 }
 
