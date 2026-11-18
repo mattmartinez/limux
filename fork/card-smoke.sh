@@ -194,7 +194,25 @@ check "restored agent tab: cd moves the card's folder" "[ \"\$(jq -r .cwd <<<'$J
 check "restored agent tab: cd shows the branch" "[ \"\$(jq -r .git_branch <<<'$J3')\" = 'card-demo' ]"
 check "restored agent tab: shell left POSIX mode and read its startup files" \
   "grep -qxF 'posix=off prompt=[smoke> ] hook=__ghostty_precmd' '$HOME/restored-shell.txt'"
+
+# Like cmux, a workspace nobody named takes its focused terminal's title; bash's
+# prompt sets that to the folder (\w). The path row then hides its echo.
+check "unnamed workspace takes the terminal's title" "[ \"\$(jq -r .title <<<'$J3')\" = '~/work/demo-repo' ]"
 shot 06-restored-agent-tab
+# An agent's spinner frame is dropped, so its animated title is one name.
+cli send 'printf "\033]2;\342\240\202 Smoke task\007"; sleep 4' >/dev/null && cli send-key Enter >/dev/null
+sleep 1.5
+check "a spinner frame is dropped from the title" \
+  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task' ]"
+sleep 3
+# A name the user chose stays, and is saved as theirs.
+cli rename-workspace --workspace "$(jq -r .ref <<<"$J3")" "Pinned name" >/dev/null
+cli send 'cd ~' >/dev/null && cli send-key Enter >/dev/null
+sleep 1.5
+check "a name the user chose survives a title change" \
+  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Pinned name' ]"
+check "the session saves the name as the user's" "[ \"\$(jq -r '.workspaces[0].named_by_user' '$S')\" = true ]"
+shot 07-named-workspace
 
 stop_host
 sleep 1
