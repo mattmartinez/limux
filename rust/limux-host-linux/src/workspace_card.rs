@@ -528,10 +528,10 @@ mod tests {
         let repo = root.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::create_dir_all(repo.join("src/deep")).unwrap();
-        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/CD-3898\n").unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/fix-123\n").unwrap();
         assert_eq!(
             git_branch_for(&repo.join("src/deep")).as_deref(),
-            Some("CD-3898")
+            Some("fix-123")
         );
 
         let worktree = root.join("wt");

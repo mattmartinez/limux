@@ -4227,11 +4227,17 @@ fn render_workspace_card(workspace: &Workspace) {
         card.status_box.append(&label);
     }
     card.status_box.set_visible(!workspace.statuses.is_empty());
-    refresh_workspace_branch(workspace);
+    refresh_workspace_location(workspace);
 }
 
-/// Show the git branch of the workspace's current directory (or its folder).
-fn refresh_workspace_branch(workspace: &Workspace) {
+/// Show the workspace's current directory (once a shell has reported one; until
+/// then the folder it was opened in) and that directory's git branch, like
+/// cmux's "branch  ~/path" row.
+fn refresh_workspace_location(workspace: &Workspace) {
+    if let Some(cwd) = workspace.cwd.borrow().as_deref() {
+        workspace.path_label.set_label(&abbreviate_path(cwd));
+        workspace.path_label.set_tooltip_text(Some(cwd));
+    }
     let dir = workspace
         .cwd
         .borrow()
@@ -7940,7 +7946,7 @@ pub(crate) fn create_pane_for_workspace(
                 let s = state.borrow();
                 if let Some(ws) = s.workspaces.iter().find(|w| w.id == ws_id) {
                     *ws.cwd.borrow_mut() = Some(pwd);
-                    refresh_workspace_branch(ws);
+                    refresh_workspace_location(ws);
                 }
             });
         }),
