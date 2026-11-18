@@ -31,6 +31,7 @@ fn workspace(name: &str, tabs: &[&str]) -> WorkspaceState {
     WorkspaceState {
         id: Some(uuid::Uuid::new_v4().to_string()),
         name: name.to_string(),
+        named_by_user: None,
         favorite: false,
         cwd: None,
         folder_path: None,

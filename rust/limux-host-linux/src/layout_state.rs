@@ -60,6 +60,11 @@ pub struct WorkspaceState {
     #[serde(default)]
     pub id: Option<String>,
     pub name: String,
+    /// Whether the user or a script chose `name`. When false, the name follows
+    /// the title of the workspace's focused tab, as in cmux. `None` in sessions
+    /// saved before this field existed: see [`workspace_named_by_user`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_by_user: Option<bool>,
     #[serde(default)]
     pub favorite: bool,
     #[serde(default)]
@@ -81,6 +86,29 @@ pub struct WorkspaceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
     pub layout: LayoutNodeState,
+}
+
+/// The name Limux gives a workspace opened in `folder_path`: the folder's
+/// last segment, or the whole path when it has none.
+pub fn default_workspace_name(folder_path: &str) -> String {
+    Path::new(folder_path)
+        .file_name()
+        .map(|segment| segment.to_string_lossy().to_string())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| folder_path.to_string())
+}
+
+/// Whether a saved workspace's name belongs to the user, so its tabs' titles
+/// must not replace it. A session saved before `named_by_user` existed counts
+/// the name as the user's unless it is the default Limux gave the workspace.
+pub fn workspace_named_by_user(workspace: &WorkspaceState) -> bool {
+    workspace.named_by_user.unwrap_or_else(|| {
+        workspace
+            .folder_path
+            .as_deref()
+            .map(default_workspace_name)
+            .is_none_or(|default| default != workspace.name)
+    })
 }
 
 /// A sidebar workspace group. Members name it through `WorkspaceState::group_id`;
@@ -478,6 +506,7 @@ impl AppSessionState {
                 WorkspaceState {
                     id: None,
                     name: workspace.name,
+                    named_by_user: None,
                     favorite: workspace.favorite,
                     cwd: workspace.cwd,
                     folder_path: workspace.folder_path,
@@ -1002,6 +1031,64 @@ mod tests {
     static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
     static ENDED_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    fn named(name: &str, folder_path: Option<&str>, named_by_user: Option<bool>) -> WorkspaceState {
+        WorkspaceState {
+            id: None,
+            name: name.to_string(),
+            named_by_user,
+            favorite: false,
+            cwd: None,
+            folder_path: folder_path.map(str::to_string),
+            autostart_command: None,
+            color: None,
+            description: None,
+            group_id: None,
+            layout: LayoutNodeState::Pane(PaneState::fallback(folder_path)),
+        }
+    }
+
+    #[test]
+    fn a_saved_flag_decides_who_named_the_workspace() {
+        assert!(workspace_named_by_user(&named(
+            "demo",
+            Some("/srv/demo"),
+            Some(true)
+        )));
+        assert!(!workspace_named_by_user(&named(
+            "API",
+            Some("/srv/demo"),
+            Some(false)
+        )));
+    }
+
+    #[test]
+    fn an_older_session_keeps_only_names_that_are_not_the_folder_default() {
+        // Limux named it after its folder: titles may replace it.
+        assert!(!workspace_named_by_user(&named(
+            "tester",
+            Some("/home/tester"),
+            None
+        )));
+        assert!(!workspace_named_by_user(&named("/", Some("/"), None)));
+        // Anything else was typed by someone and stays.
+        assert!(workspace_named_by_user(&named(
+            "API server",
+            Some("/srv/demo"),
+            None
+        )));
+        assert!(workspace_named_by_user(&named("SSH: box", None, None)));
+    }
+
+    #[test]
+    fn the_flag_round_trips_and_older_files_read_without_it() {
+        let json = serde_json::to_value(named("demo", Some("/srv/demo"), Some(false))).unwrap();
+        assert_eq!(json["named_by_user"], serde_json::json!(false));
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("named_by_user");
+        let read: WorkspaceState = serde_json::from_value(older).unwrap();
+        assert_eq!(read.named_by_user, None);
+    }
+
     struct EnvGuard {
         key: &'static str,
         old: Option<std::ffi::OsString>,
@@ -1123,6 +1210,7 @@ mod tests {
             workspaces: vec![WorkspaceState {
                 id: Some("11111111-1111-4111-8111-111111111111".to_string()),
                 name: "canonical".to_string(),
+                named_by_user: None,
                 favorite: true,
                 cwd: Some("/canonical".to_string()),
                 folder_path: Some("/canonical".to_string()),
@@ -1234,6 +1322,7 @@ mod tests {
             workspaces: vec![WorkspaceState {
                 id: Some("22222222-2222-4222-8222-222222222222".to_string()),
                 name: "workspace".to_string(),
+                named_by_user: None,
                 favorite: false,
                 cwd: Some("/tmp".to_string()),
                 folder_path: Some("/tmp".to_string()),
@@ -1281,6 +1370,7 @@ mod tests {
         let mut workspace = WorkspaceState {
             id: None,
             name: "colored".to_string(),
+            named_by_user: None,
             favorite: false,
             cwd: None,
             folder_path: None,
@@ -1316,6 +1406,7 @@ mod tests {
         let mut workspace = WorkspaceState {
             id: Some("ws".to_string()),
             name: "grouped".to_string(),
+            named_by_user: None,
             favorite: false,
             cwd: None,
             folder_path: None,
@@ -2098,6 +2189,7 @@ mod tests {
             workspaces: vec![WorkspaceState {
                 id: Some("33333333-3333-4333-8333-333333333333".to_string()),
                 name: "workspace".to_string(),
+                named_by_user: None,
                 favorite: false,
                 cwd: None,
                 folder_path: None,

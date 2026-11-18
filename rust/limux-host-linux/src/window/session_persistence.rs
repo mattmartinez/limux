@@ -407,6 +407,7 @@ pub(super) fn snapshot_session_state(state: &State) -> AppSessionState {
             WorkspaceState {
                 id: Some(workspace.id.clone()),
                 name: workspace.name.clone(),
+                named_by_user: Some(workspace.named_by_user),
                 favorite: s.sidebar.is_favorite(&workspace.id),
                 cwd,
                 folder_path,

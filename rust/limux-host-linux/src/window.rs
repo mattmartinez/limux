@@ -51,6 +51,11 @@ const SESSION_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis
 struct Workspace {
     id: String,
     name: String,
+    /// The user or a script chose `name`. Otherwise it follows the title of
+    /// `title_tab`, as cmux's workspace title follows its focused panel.
+    named_by_user: bool,
+    /// The tab this workspace last had focused; `None` until one is.
+    title_tab: Option<String>,
     /// The root widget in the content stack for this workspace.
     root: gtk::Widget,
     /// Manages the split tree data model and async widget rebuild.
@@ -2150,6 +2155,16 @@ pub fn build_window(app: &adw::Application) {
     }
 
     install_sidebar_resize(&state, &main_split, &sidebar, &sidebar_shell);
+
+    // The focused tab names its workspace. Focus moves while the state may be
+    // borrowed, so look once the main loop is idle.
+    {
+        let state = state.clone();
+        window.connect_focus_widget_notify(move |_| {
+            let state = state.clone();
+            glib::idle_add_local_once(move || note_focused_tab(&state));
+        });
+    }
 
     {
         let state = state.clone();
@@ -4262,6 +4277,112 @@ fn refresh_workspace_location(workspace: &Workspace) {
             label.set_visible(false);
         }
     }
+    sync_workspace_path_echo(workspace);
+}
+
+/// `LIMUX_DEBUG_TITLES=1` logs each workspace-title decision to stderr.
+fn title_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LIMUX_DEBUG_TITLES").is_some_and(|v| v == "1"))
+}
+
+/// cmux's title for a workspace nobody named: the title of the tab it last had
+/// focused (the tab's own name, else what its terminal set), with any spinner
+/// frame dropped. A name the user or a script chose stays.
+fn refresh_workspace_title(workspace: &mut Workspace, reason: &str) {
+    let debug = title_debug_enabled();
+    if workspace.named_by_user {
+        if debug {
+            eprintln!(
+                "limux: title ws={} {reason}: kept, named by user: {:?}",
+                workspace.id, workspace.name
+            );
+        }
+        return;
+    }
+    let raw = workspace_focused_tab_title(workspace);
+    let Some(title) = raw
+        .as_deref()
+        .and_then(workspace_card::workspace_title_from_terminal)
+    else {
+        if debug {
+            eprintln!(
+                "limux: title ws={} {reason}: kept {:?}, no usable tab title (raw {raw:?}, tab {:?})",
+                workspace.id, workspace.name, workspace.title_tab
+            );
+        }
+        return;
+    };
+    if workspace.name == title {
+        return;
+    }
+    if debug {
+        eprintln!(
+            "limux: title ws={} {reason}: {:?} -> {title:?} (tab {:?})",
+            workspace.id, workspace.name, workspace.title_tab
+        );
+    }
+    set_workspace_name(workspace, title);
+}
+
+/// Show `name` on the card and the indicator pill.
+fn set_workspace_name(workspace: &mut Workspace, name: String) {
+    workspace.name_label.set_label(&name);
+    update_indicator_label(&workspace.indicator_button, &name);
+    workspace.name = name;
+    sync_workspace_path_echo(workspace);
+}
+
+/// The title of the tab the workspace last had focused, or, before one was or
+/// once it closed, of the active tab in its first pane.
+fn workspace_focused_tab_title(workspace: &Workspace) -> Option<String> {
+    if let Some(tab_id) = workspace.title_tab.as_deref() {
+        let title = workspace
+            .split_container
+            .panes()
+            .iter()
+            .find_map(|pane_widget| pane::tab_title_for_workspace(pane_widget, tab_id));
+        if title.is_some() {
+            return title;
+        }
+    }
+    let pane_widget = workspace.split_container.shown_pane();
+    let tab_id = pane::active_tab_in_pane(&pane_widget)?;
+    pane::tab_title_for_workspace(&pane_widget, &tab_id)
+}
+
+/// Like cmux, leave out a folder that only repeats the title ("~" under "~").
+fn sync_workspace_path_echo(workspace: &Workspace) {
+    let row_shown = workspace
+        .path_label
+        .parent()
+        .is_none_or(|row| row.is_visible());
+    let echoes = workspace.path_label.label() == workspace.name;
+    workspace.path_label.set_visible(row_shown && !echoes);
+}
+
+/// Keyboard focus moved: the focused tab becomes its workspace's title tab, as
+/// cmux's workspace title follows its focused panel.
+fn note_focused_tab(state: &State) {
+    let Some((workspace_id, pane_widget)) = find_leaf_focused_pane(state) else {
+        return;
+    };
+    let Some(tab_id) = pane::active_tab_in_pane(&pane_widget) else {
+        return;
+    };
+    let mut app_state = state.borrow_mut();
+    let Some(workspace) = app_state
+        .workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return;
+    };
+    if workspace.title_tab.as_deref() == Some(tab_id.as_str()) {
+        return;
+    }
+    workspace.title_tab = Some(tab_id);
+    refresh_workspace_title(workspace, "focus");
 }
 
 /// Apply one card request from the control socket and describe the result.
@@ -4316,6 +4437,7 @@ fn sync_workspace_path_visibility(state: &State, show_workspace_path: bool) {
             workspace.folder_path.as_deref(),
             show_workspace_path,
         );
+        sync_workspace_path_echo(workspace);
     }
 }
 
@@ -4954,9 +5076,8 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
             .iter_mut()
             .find(|workspace| workspace.id == workspace_id)
         {
-            workspace.name = next_name;
-            // Update the indicator pill label
-            update_indicator_label(&workspace.indicator_button, &workspace.name);
+            workspace.named_by_user = true;
+            set_workspace_name(workspace, next_name);
         }
         drop(s);
         request_session_save(state);
@@ -5281,6 +5402,8 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
             name: seed.name.clone(),
+            named_by_user: false,
+            title_tab: None,
             root: root.clone().upcast(),
             split_container,
             sidebar_row: row,
@@ -5839,10 +5962,13 @@ fn create_workspace_with_folder(state: &State, name: &str, folder_path: &str) {
     request_session_save(state);
 }
 
+/// A name other than the folder's default was chosen by the user or a script
+/// and stays; the default follows the focused tab's title.
 fn workspace_state_with_folder(name: &str, folder_path: &str) -> WorkspaceState {
     WorkspaceState {
         id: None,
         name: name.to_string(),
+        named_by_user: Some(name != layout_state::default_workspace_name(folder_path)),
         favorite: false,
         cwd: Some(folder_path.to_string()),
         folder_path: Some(folder_path.to_string()),
@@ -5857,11 +5983,7 @@ fn workspace_state_with_folder(name: &str, folder_path: &str) -> WorkspaceState 
 fn initial_workspace_state(home_dir: Option<&Path>, current_dir: Option<&Path>) -> WorkspaceState {
     let folder = home_dir.or(current_dir).unwrap_or_else(|| Path::new("/"));
     let folder_path = folder.to_string_lossy();
-    let name = folder
-        .file_name()
-        .map(|segment| segment.to_string_lossy())
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or_else(|| folder_path.clone());
+    let name = layout_state::default_workspace_name(&folder_path);
     workspace_state_with_folder(&name, &folder_path)
 }
 
@@ -6011,6 +6133,8 @@ fn break_tabs_into_new_workspace(
         app_state.workspaces.push(Workspace {
             id: new_workspace_id.clone(),
             name: seed.name.clone(),
+            named_by_user: false,
+            title_tab: None,
             root: root.clone().upcast(),
             split_container: split_container.clone(),
             sidebar_row: row,
@@ -6429,9 +6553,8 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             {
                 let mut app_state = state.borrow_mut();
                 let workspace = &mut app_state.workspaces[index];
-                workspace.name = title.clone();
-                workspace.name_label.set_label(&title);
-                update_indicator_label(&workspace.indicator_button, &title);
+                workspace.named_by_user = true;
+                set_workspace_name(workspace, title);
             }
             request_session_save(state);
 
@@ -6801,6 +6924,16 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             }
 
+            // A renamed or newly selected tab can be what names the workspace.
+            if let Some(workspace) = state.borrow_mut().workspaces.get_mut(index) {
+                if workspace
+                    .title_tab
+                    .as_deref()
+                    .is_none_or(|title_tab| title_tab == tab_id)
+                {
+                    refresh_workspace_title(workspace, "tab action");
+                }
+            }
             request_session_save(state);
 
             let _ = reply.send(Ok(serde_json::json!({
@@ -7611,9 +7744,12 @@ fn connect_ssh_target(
     if !gui_hooks::run_gui_hook(state, GuiHookEvent::OnWorkspaceCreate, &context) {
         return;
     }
+    // "SSH: host" says where the workspace runs; the remote shell's title
+    // must not replace it.
     let workspace = WorkspaceState {
         id: None,
         name,
+        named_by_user: Some(true),
         favorite: false,
         cwd: None,
         folder_path: None,
@@ -7760,6 +7896,8 @@ fn add_workspace_with_initial_command(
     let ws = Workspace {
         id,
         name: workspace.name.clone(),
+        named_by_user: layout_state::workspace_named_by_user(workspace),
+        title_tab: None,
         root,
         split_container,
         sidebar_row: row.clone(),
@@ -7836,6 +7974,7 @@ pub(crate) fn create_pane_for_workspace(
     let state_for_open_url = state.clone();
     let state_for_keybinds = state.clone();
     let state_for_pwd = state.clone();
+    let state_for_title = state.clone();
     let state_for_empty = state.clone();
     let state_for_unread = state.clone();
     let state_for_visibility = state.clone();
@@ -7845,6 +7984,7 @@ pub(crate) fn create_pane_for_workspace(
     let ws_id_desktop_notification = ws_id.to_string();
     let ws_id_open_url = ws_id.to_string();
     let ws_id_pwd = ws_id.to_string();
+    let ws_id_title = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
     let ws_id_unread = ws_id.to_string();
     let ws_id_visibility = ws_id.to_string();
@@ -7947,6 +8087,26 @@ pub(crate) fn create_pane_for_workspace(
                 if let Some(ws) = s.workspaces.iter().find(|w| w.id == ws_id) {
                     *ws.cwd.borrow_mut() = Some(pwd);
                     refresh_workspace_location(ws);
+                }
+            });
+        }),
+        on_title_changed: Box::new(move |tab_id: &str| {
+            let state = state_for_title.clone();
+            let ws_id = ws_id_title.clone();
+            let tab_id = tab_id.to_string();
+            glib::idle_add_local_once(move || {
+                let mut s = state.borrow_mut();
+                let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) else {
+                    return;
+                };
+                // Only the title tab names the workspace; before one is
+                // focused, the first pane's active tab does.
+                if ws
+                    .title_tab
+                    .as_deref()
+                    .is_none_or(|title_tab| title_tab == tab_id)
+                {
+                    refresh_workspace_title(ws, "tab title");
                 }
             });
         }),
@@ -10148,12 +10308,25 @@ mod tests {
         );
 
         assert_eq!(workspace.name, "tester");
+        assert_eq!(workspace.named_by_user, Some(false));
         assert_eq!(workspace.cwd.as_deref(), Some("/home/tester"));
         assert_eq!(workspace.folder_path.as_deref(), Some("/home/tester"));
         let LayoutNodeState::Pane(pane) = workspace.layout else {
             panic!("initial workspace must contain a terminal pane");
         };
         assert_eq!(pane.tabs.len(), 1);
+    }
+
+    #[test]
+    fn only_a_chosen_workspace_name_is_the_users() {
+        assert_eq!(
+            super::workspace_state_with_folder("demo", "/srv/demo").named_by_user,
+            Some(false)
+        );
+        assert_eq!(
+            super::workspace_state_with_folder("API server", "/srv/demo").named_by_user,
+            Some(true)
+        );
     }
 
     #[test]
@@ -10319,6 +10492,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),

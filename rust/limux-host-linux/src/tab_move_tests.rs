@@ -42,6 +42,7 @@ fn moving_a_first_tab_to_another_workspace_keeps_tab_ids_unique() {
         &WorkspaceState {
             id: None,
             name: "target".to_string(),
+            named_by_user: None,
             favorite: false,
             cwd: None,
             folder_path: None,
@@ -128,6 +129,7 @@ fn a_tab_moved_to_another_workspace_answers_to_its_original_ids() {
             &WorkspaceState {
                 id: None,
                 name: name.to_string(),
+                named_by_user: None,
                 favorite: false,
                 cwd: None,
                 folder_path: None,
@@ -261,6 +263,7 @@ fn an_unscoped_surface_hint_is_resolved_once_across_workspaces() {
             &WorkspaceState {
                 id: None,
                 name: name.to_string(),
+                named_by_user: None,
                 favorite: false,
                 cwd: None,
                 folder_path: None,
@@ -341,6 +344,7 @@ fn a_surface_hidden_by_a_zoom_is_reported_not_found() {
         &WorkspaceState {
             id: None,
             name: "zoomed".to_string(),
+            named_by_user: None,
             favorite: false,
             cwd: None,
             folder_path: None,
