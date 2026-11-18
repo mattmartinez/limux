@@ -2176,7 +2176,7 @@ fn add_terminal_tab_inner(
     let restored_agent_command = options
         .as_ref()
         .and_then(|value| value.agent.as_ref())
-        .and_then(|agent| agent.resume_command());
+        .and_then(|agent| agent.resume_command(terminal::terminal_shell_integration_enabled()));
     if let Some(command) = restored_agent_command.as_deref() {
         eprintln!(
             "limux: restoring agent terminal surface={}:{} command={}",
