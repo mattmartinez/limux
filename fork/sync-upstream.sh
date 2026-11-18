@@ -96,7 +96,12 @@ log "running the live card checks"
 
 # 6. package
 log "building the package"
-(cd "$ROOT/fork" && makepkg -f --noconfirm > "$ROOT/.tools/makepkg.log" 2>&1) || die "makepkg failed, see .tools/makepkg.log"
+# makepkg writes the computed version into PKGBUILD's pkgver= line; put the
+# committed file back afterwards, pass or fail, so the next run starts clean.
+built=0
+(cd "$ROOT/fork" && makepkg -f --noconfirm > "$ROOT/.tools/makepkg.log" 2>&1) && built=1
+git checkout -q -- fork/PKGBUILD
+[ "$built" = 1 ] || die "makepkg failed, see .tools/makepkg.log"
 pkg=$(ls -t "$ROOT"/fork/limux-card-*.pkg.tar.zst | head -1)
 log "package: $pkg"
 

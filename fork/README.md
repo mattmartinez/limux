@@ -31,7 +31,7 @@ The local remotes are `origin` (this fork) and `upstream` (am-will/limux, push d
 
 ```bash
 fork/card-smoke.sh                      # 18 live checks, isolated under Xvfb
-cd fork && makepkg -f                   # package limux-card, replaces limux-bin
+(cd fork && makepkg -f && git checkout PKGBUILD)  # package limux-card; makepkg rewrites pkgver=
 sudo pacman -U fork/limux-card-*.pkg.tar.zst
 ```
 
