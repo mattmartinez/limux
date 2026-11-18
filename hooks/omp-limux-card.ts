@@ -3,14 +3,13 @@
 // Install: copy to ~/.omp/agent/extensions/limux-card.ts (or under $OMP_AGENT_DIR).
 // omp loads it at startup. It does nothing outside a Limux terminal.
 //
-// What it does, inside Limux:
-//   - prompt submitted        -> status row `omp`: Running
-//   - turn finished           -> status row `omp`: Idle, plus a notification with
-//                                the start of omp's last reply, and a background
-//                                `limux refresh-pr` for the PR row
-//   - session start           -> Idle
-//   - session shutdown        -> the `omp` row is removed
-// Turns omp continues by itself (retries, queued messages) stay Running.
+// What it does, inside Limux, when a turn finishes: a notification with the
+// start of omp's last reply, and a background `limux refresh-pr` for the PR
+// row. Turns omp continues by itself (retries, queued messages) are skipped.
+//
+// omp's state (working, done, waiting on you, failed) needs nothing from this
+// file: omp reports it over OSC 7501 and Limux shows it as the card's
+// `omp · Working` row, the way cmux does.
 //
 // Opt out per process with LIMUX_OMP_CARD_DISABLED=1. Every call has a short
 // timeout and its errors are ignored, so the card can never block or fail a turn.
@@ -20,7 +19,6 @@ import * as path from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 const CALL_TIMEOUT_MS = 1500;
-const KEY = "omp";
 
 function enabled(): boolean {
   return process.env.LIMUX_OMP_CARD_DISABLED !== "1" && !!process.env.LIMUX_WORKSPACE_ID;
@@ -102,35 +100,15 @@ function limux(args: string[], detach = false): Promise<void> {
   });
 }
 
-function setStatus(value: string, icon: string, color: string): Promise<void> {
-  return limux(["set-status", KEY, value, "--icon", icon, "--color", color, "--priority", "10"]);
-}
-
 export default function limuxCardExtension(api: ExtensionAPI) {
-  api.on("session_start", async (_event, ctx) => {
-    if (!enabled() || isNestedSession(ctx)) return;
-    await setStatus("Idle", "pause.circle.fill", "#8d8d8d");
-  });
-
-  api.on("before_agent_start", async (_event, ctx) => {
-    if (!enabled() || isNestedSession(ctx)) return;
-    await setStatus("Running", "bolt.fill", "#5c9cf5");
-  });
-
   api.on("agent_end", async (event, ctx) => {
     if (!enabled() || isNestedSession(ctx)) return;
     // omp ends a turn it is about to continue by itself (auto-retry, queued
     // messages, background jobs) with willContinue; it is still running then.
     if ((event as { willContinue?: unknown }).willContinue === true) return;
-    await setStatus("Idle", "pause.circle.fill", "#8d8d8d");
     const reply = lastAssistantText(event);
     await limux(["notify", "--body", oneLine(reply ?? "turn complete"), "omp finished"]);
     const cwd = firstString(ctx.cwd, process.cwd()) ?? process.cwd();
     await limux(["refresh-pr", "--cwd", cwd], true);
-  });
-
-  api.on("session_shutdown", async (_event, ctx) => {
-    if (!enabled() || isNestedSession(ctx)) return;
-    await limux(["clear-status", KEY]);
   });
 }

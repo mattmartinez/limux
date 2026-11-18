@@ -46,6 +46,7 @@ impl Fixture {
                     on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                     on_pwd_changed: Box::new(|_| {}),
                     on_title_changed: Box::new(|_| {}),
+                    on_program_status: Box::new(|_, _| {}),
                     on_empty: Box::new(|_, _| {}),
                     on_state_changed: Box::new(|| {}),
                     on_unread_changed: Box::new(|| {}),

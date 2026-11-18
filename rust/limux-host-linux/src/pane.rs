@@ -257,6 +257,7 @@ type PaneWidgetCallback = dyn Fn(&gtk::Widget);
 type PaneSignalCallback = dyn Fn();
 type PaneBellCallback = dyn Fn(bool, u32, &str);
 type PanePathCallback = dyn Fn(&str);
+type PaneProgramStatusCallback = dyn Fn(&str, crate::program_status::Report);
 type PaneDesktopNotificationCallback = dyn Fn(&str, &str, bool, u32, &str);
 type PaneEmptyCallback = dyn Fn(&gtk::Widget, PaneEmptyReason);
 type PaneOpenBrowserHereCallback = dyn Fn(&gtk::Widget);
@@ -290,6 +291,9 @@ pub struct PaneCallbacks {
     pub on_pwd_changed: Box<PanePathCallback>,
     /// A terminal tab's title changed; the argument is the tab's id.
     pub on_title_changed: Box<PanePathCallback>,
+    /// A terminal tab's OSC 7501 report, or its prompt start or exit; the first
+    /// argument is the tab's id.
+    pub on_program_status: Box<PaneProgramStatusCallback>,
     pub on_empty: Box<PaneEmptyCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
     pub on_unread_changed: Box<PaneSignalCallback>,
@@ -1640,6 +1644,7 @@ fn make_terminal_callbacks(
     let title_label = title_label.clone();
     let state_for_title = internals.tab_state.clone();
     let callbacks_for_title = internals.callbacks.clone();
+    let callbacks_for_exit = internals.callbacks.clone();
     let callbacks_for_bell = internals.callbacks.clone();
     let callbacks_for_pwd = internals.callbacks.clone();
     let callbacks_for_browser_here = internals.callbacks.clone();
@@ -1716,8 +1721,18 @@ fn make_terminal_callbacks(
                 (callbacks_for_bell.on_bell)(source_focused, pane_id, &tab_id);
             }
         }),
+        on_program_status: Box::new({
+            let callbacks = internals.callbacks.clone();
+            let tab_id = tab_id.to_string();
+            move |report| (callbacks.on_program_status)(&tab_id, report)
+        }),
         on_close: Box::new(move |code| {
             let tab_id = tid_for_close.clone();
+            // Like cmux, the tab's working and blocked records end with its process.
+            (callbacks_for_exit.on_program_status)(
+                &tab_id,
+                crate::program_status::Report::prompt_start(),
+            );
             let generation = terminal_tab_owner(&tab_id).and_then(|pane| {
                 let tabs = pane.tab_state.borrow();
                 let entry = tabs.tabs.iter().find(|entry| entry.id == tab_id)?;
@@ -5148,6 +5163,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5292,6 +5308,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5416,6 +5433,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5547,6 +5565,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5701,6 +5720,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5854,6 +5874,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5936,6 +5957,7 @@ mod tests {
             on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
             on_pwd_changed: Box::new(|_| {}),
             on_title_changed: Box::new(|_| {}),
+            on_program_status: Box::new(|_, _| {}),
             on_empty: Box::new(|_, _| {}),
             on_state_changed: Box::new(|| {}),
             on_unread_changed: Box::new(|| {}),
@@ -6023,6 +6045,7 @@ mod tests {
             on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
             on_pwd_changed: Box::new(|_| {}),
             on_title_changed: Box::new(|_| {}),
+            on_program_status: Box::new(|_, _| {}),
             on_empty: Box::new(|_, _| {}),
             on_state_changed: Box::new(move || {
                 state_changes_cb.set(state_changes_cb.get() + 1);

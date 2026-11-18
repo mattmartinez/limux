@@ -10,6 +10,7 @@ mod keybind_editor;
 mod layout_state;
 mod link_uri;
 mod pane;
+mod program_status;
 mod session_store;
 mod settings_editor;
 mod shortcut_config;

@@ -63,6 +63,7 @@ static EMPTY_CLIPBOARD_TEXT: [u8; 1] = [0];
 
 type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
+type ProgramStatusCallback = dyn Fn(crate::program_status::Report);
 type DesktopNotificationCallback = dyn Fn(&str, &str, bool);
 type BellCallback = dyn Fn(bool);
 type OpenUrlCallback = dyn Fn(&str, LinkOpenRequest);
@@ -1049,6 +1050,44 @@ unsafe extern "C" fn ghostty_wakeup_cb(_userdata: *mut c_void) {
     });
 }
 
+/// Copy an OSC 7501 action out of Ghostty; its strings live only for the
+/// callback. Values Ghostty never sends fall back to the inert ones.
+fn program_status_report(raw: &ghostty_action_program_status_s) -> crate::program_status::Report {
+    use crate::program_status::{Event, Kind, Report, State};
+    let text = |ptr: *const c_char| {
+        (!ptr.is_null()).then(|| {
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    Report {
+        event: match raw.event {
+            GHOSTTY_PROGRAM_STATUS_EVENT_PROMPT_START => Event::PromptStart,
+            _ => Event::Report,
+        },
+        state: match raw.state {
+            GHOSTTY_PROGRAM_STATUS_WORKING => State::Working,
+            GHOSTTY_PROGRAM_STATUS_DONE => State::Done,
+            GHOSTTY_PROGRAM_STATUS_BLOCKED => State::Blocked,
+            GHOSTTY_PROGRAM_STATUS_ERROR => State::Error,
+            GHOSTTY_PROGRAM_STATUS_CLEAR => State::Clear,
+            _ => State::Idle,
+        },
+        kind: match raw.kind {
+            GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION => Kind::Permission,
+            GHOSTTY_PROGRAM_STATUS_KIND_QUESTION => Kind::Question,
+            GHOSTTY_PROGRAM_STATUS_KIND_AUTH => Kind::Auth,
+            _ => Kind::None,
+        },
+        progress: u8::try_from(raw.progress).ok().filter(|p| *p <= 100),
+        id: text(raw.id),
+        app: text(raw.app),
+        title: text(raw.title),
+        msg: text(raw.msg),
+    }
+}
+
 unsafe extern "C" fn ghostty_action_cb(
     app: ghostty_app_t,
     target: ghostty_target_s,
@@ -1109,6 +1148,23 @@ unsafe extern "C" fn ghostty_action_cb(
                             }
                         }
                     });
+                }
+            }
+            true
+        }
+        GHOSTTY_ACTION_PROGRAM_STATUS => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let report = program_status_report(unsafe { &action.action.program_status });
+                // Clone the callbacks out of the map so the handler may touch
+                // the surface map itself.
+                let callbacks = SURFACE_MAP.with(|map| {
+                    map.borrow()
+                        .get(&surface_key)
+                        .map(|entry| entry.output_callbacks.clone())
+                });
+                if let Some(callbacks) = callbacks {
+                    (callbacks.borrow().on_program_status)(report);
                 }
             }
             true
@@ -1456,6 +1512,8 @@ unsafe extern "C" fn ghostty_close_surface_cb(userdata: *mut c_void, _process_al
 pub struct TerminalCallbacks {
     pub on_output_activity: Rc<dyn Fn(Instant)>,
     pub on_title_changed: Box<TitleChangedCallback>,
+    /// An OSC 7501 report, or a prompt start that ends working and blocked records.
+    pub on_program_status: Box<ProgramStatusCallback>,
     pub on_pwd_changed: Box<PwdChangedCallback>,
     pub on_desktop_notification: Box<DesktopNotificationCallback>,
     pub on_bell: Box<BellCallback>,
@@ -1479,6 +1537,7 @@ impl TerminalCallbacks {
             on_output_activity: Rc::new(|_| {}),
             image_paste_destination: Box::new(|| Ok(image_paste::ImagePasteDestination::Local)),
             on_title_changed: Box::new(|_| {}),
+            on_program_status: Box::new(|_| {}),
             on_pwd_changed: Box::new(|_| {}),
             on_desktop_notification: Box::new(|_, _, _| {}),
             on_bell: Box::new(|_| {}),

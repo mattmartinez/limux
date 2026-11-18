@@ -98,6 +98,21 @@ pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 49;
 pub const GHOSTTY_ACTION_RING_BELL: c_int = 50;
 pub const GHOSTTY_ACTION_OPEN_URL: c_int = 54;
 pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 55;
+pub const GHOSTTY_ACTION_PROGRAM_STATUS: c_int = 66;
+
+// OSC 7501 program status (ghostty_action_program_status_s).
+pub const GHOSTTY_PROGRAM_STATUS_EVENT_REPORT: c_int = 0;
+pub const GHOSTTY_PROGRAM_STATUS_EVENT_PROMPT_START: c_int = 1;
+pub const GHOSTTY_PROGRAM_STATUS_IDLE: c_int = 0;
+pub const GHOSTTY_PROGRAM_STATUS_WORKING: c_int = 1;
+pub const GHOSTTY_PROGRAM_STATUS_DONE: c_int = 2;
+pub const GHOSTTY_PROGRAM_STATUS_BLOCKED: c_int = 3;
+pub const GHOSTTY_PROGRAM_STATUS_ERROR: c_int = 4;
+pub const GHOSTTY_PROGRAM_STATUS_CLEAR: c_int = 5;
+pub const GHOSTTY_PROGRAM_STATUS_KIND_NONE: c_int = 0;
+pub const GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION: c_int = 1;
+pub const GHOSTTY_PROGRAM_STATUS_KIND_QUESTION: c_int = 2;
+pub const GHOSTTY_PROGRAM_STATUS_KIND_AUTH: c_int = 3;
 
 pub type ghostty_action_mouse_shape_e = c_int;
 
@@ -437,7 +452,8 @@ pub struct ghostty_action_s {
 
 // We only need a subset of the action union — for matching on tag
 // we just access the right field after checking the tag.
-// Must be exactly 24 bytes to match the C union.
+// Must be exactly 48 bytes to match the C union (the program status struct
+// is its largest member); ghostty_action_s is passed by value.
 #[repr(C)]
 pub union ghostty_action_u {
     pub scrollbar: ghostty_action_scrollbar_s,
@@ -449,8 +465,27 @@ pub union ghostty_action_u {
     pub mouse_visibility: ghostty_action_mouse_visibility_e,
     pub mouse_over_link: ghostty_action_mouse_over_link_s,
     pub child_exited: ghostty_surface_message_childexited_s,
-    _padding: [u8; 24],
+    pub program_status: ghostty_action_program_status_s,
+    _padding: [u8; 48],
 }
+
+/// One OSC 7501 report or a prompt-start event. The strings are borrowed for
+/// the duration of the action callback; `progress` is -1 when absent.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_action_program_status_s {
+    pub event: c_int,
+    pub state: c_int,
+    pub kind: c_int,
+    pub progress: i8,
+    pub id: *const c_char,
+    pub app: *const c_char,
+    pub title: *const c_char,
+    pub msg: *const c_char,
+}
+
+const _: () = assert!(std::mem::size_of::<ghostty_action_u>() == 48);
+const _: () = assert!(std::mem::size_of::<ghostty_action_program_status_s>() == 48);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -689,9 +724,14 @@ mod tests {
         assert_eq!(offset_of!(ghostty_runtime_config_s, read_clipboard_cb), 32);
         assert_eq!(offset_of!(ghostty_runtime_config_s, tmux_control_cb), 64);
 
-        assert_eq!(size_of::<ghostty_action_u>(), 24);
-        assert_eq!(size_of::<ghostty_action_s>(), 32);
+        assert_eq!(size_of::<ghostty_action_u>(), 48);
+        assert_eq!(size_of::<ghostty_action_s>(), 56);
         assert_eq!(offset_of!(ghostty_action_s, action), 8);
+        assert_eq!(size_of::<ghostty_action_program_status_s>(), 48);
+        assert_eq!(offset_of!(ghostty_action_program_status_s, kind), 8);
+        assert_eq!(offset_of!(ghostty_action_program_status_s, progress), 12);
+        assert_eq!(offset_of!(ghostty_action_program_status_s, id), 16);
+        assert_eq!(offset_of!(ghostty_action_program_status_s, msg), 40);
         assert_eq!(size_of::<ghostty_action_pwd_s>(), 24);
         assert_eq!(size_of::<ghostty_surface_message_childexited_s>(), 16);
     }

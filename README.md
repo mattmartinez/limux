@@ -296,14 +296,24 @@ limux refresh-pr
 - **The git branch** of the workspace's current directory is shown on its own
   line above its path, read from `.git/HEAD` (worktrees included) without
   running git. A pull request row comes after the path.
+- **Program status (OSC 7501).** Programs that speak the
+  [program status protocol](https://www.superlogical.com/rex/docs/build/program-status),
+  such as omp, write their state to the terminal, and the card shows the
+  workspace's most urgent record as one row, as cmux does: `omp · Working` (⚡,
+  with a percentage when given), `omp · Done` (✓), `omp · Needs permission`
+  (🔔) or `Failed` (⚠). Working and blocked records end at the next shell
+  prompt or when the tab's process exits; done and error records stay until
+  you come back to that tab. Limux answers the protocol's support query, and
+  its terminfo lists `Pst`. `LIMUX_DEBUG_PROGRAM_STATUS=1` logs each report.
 - **Agent lifecycle.** The hooks from `limux hooks setup` set a row under the
   agent's own key: Running when a prompt is submitted, Needs input on a
   notification, Idle when a turn ends, and remove it when the session ends.
   After each turn they start `limux refresh-pr` in the background. Opt out with
   `LIMUX_CARD_STATUS_DISABLED=1` (rows) or `LIMUX_PR_STATUS_DISABLED=1` (PR row).
 - **oh-my-pi (omp).** Copy [`hooks/omp-limux-card.ts`](hooks/omp-limux-card.ts)
-  to `~/.omp/agent/extensions/`. It sets the `omp` row, posts a notification
-  with the start of omp's reply when a turn ends, and does nothing outside Limux.
+  to `~/.omp/agent/extensions/`. When a turn ends it posts a notification with
+  the start of omp's reply and refreshes the PR row; omp reports its own state
+  over OSC 7501. It does nothing outside Limux.
 - `limux --json list-workspaces` includes each workspace's `description`,
   `statuses` and `git_branch`.
 

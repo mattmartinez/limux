@@ -88,6 +88,9 @@ struct Workspace {
     card: CardWidgets,
     /// Agent-written status rows; in memory only.
     statuses: workspace_card::StatusMap,
+    /// OSC 7501 program status records of each terminal tab, by tab id. The
+    /// most urgent is shown as the `program_status` row.
+    program_status: HashMap<String, crate::program_status::Store>,
     /// The user's one-line description of the workspace; saved with the session.
     description: Option<String>,
     /// The workspace indicator pill in the top bar.
@@ -4394,11 +4397,97 @@ fn note_focused_tab(state: &State) {
     else {
         return;
     };
+    // Back in a tab: its done and error records have been seen (cmux).
+    if workspace
+        .program_status
+        .get_mut(&tab_id)
+        .is_some_and(crate::program_status::Store::dismiss_completed)
+    {
+        refresh_program_status_row(workspace, "focus");
+    }
     if workspace.title_tab.as_deref() == Some(tab_id.as_str()) {
         return;
     }
     workspace.title_tab = Some(tab_id);
     refresh_workspace_title(workspace, "focus");
+}
+
+/// `LIMUX_DEBUG_PROGRAM_STATUS=1` logs each OSC 7501 report and card change.
+fn program_status_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("LIMUX_DEBUG_PROGRAM_STATUS").is_some_and(|v| v == "1"))
+}
+
+/// Apply one OSC 7501 report (or prompt start) from a terminal tab.
+fn apply_program_status(
+    workspace: &mut Workspace,
+    tab_id: &str,
+    report: crate::program_status::Report,
+) {
+    if program_status_debug_enabled() {
+        eprintln!(
+            "limux: program status ws={} tab={tab_id}: {report:?}",
+            workspace.id
+        );
+    }
+    // A prompt start in a tab without records has nothing to end.
+    if report.event == crate::program_status::Event::PromptStart
+        && !workspace.program_status.contains_key(tab_id)
+    {
+        return;
+    }
+    workspace
+        .program_status
+        .entry(tab_id.to_string())
+        .or_default()
+        .apply(report);
+    refresh_program_status_row(workspace, "report");
+}
+
+/// Drop the records of closed tabs and show the workspace's most urgent
+/// record as the `program_status` row, or no row.
+fn refresh_program_status_row(workspace: &mut Workspace, reason: &str) {
+    if !workspace.program_status.is_empty() {
+        let open: std::collections::HashSet<String> = workspace
+            .split_container
+            .panes()
+            .iter()
+            .flat_map(pane::tab_ids_in_pane)
+            .collect();
+        workspace
+            .program_status
+            .retain(|tab_id, store| open.contains(tab_id) && !store.is_empty());
+    }
+    let row = crate::program_status::workspace_row(workspace.program_status.values());
+    let key = crate::program_status::STATUS_KEY;
+    let shown = workspace
+        .statuses
+        .sorted()
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .cloned();
+    if shown == row {
+        return;
+    }
+    if program_status_debug_enabled() {
+        eprintln!(
+            "limux: program status ws={} {reason}: row {:?}",
+            workspace.id,
+            row.as_ref().map(|entry| entry.value.as_str())
+        );
+    }
+    match row {
+        Some(entry) => {
+            if let Err(error) = workspace.statuses.set(entry) {
+                eprintln!("limux: program status ws={}: {error}", workspace.id);
+            }
+        }
+        None => {
+            workspace.statuses.clear(Some(key));
+        }
+    }
+    render_workspace_card(workspace);
 }
 
 /// Apply one card request from the control socket and describe the result.
@@ -5436,6 +5525,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             path_label,
             card,
             statuses: workspace_card::StatusMap::default(),
+            program_status: HashMap::new(),
             description: None,
             indicator_button,
             indicator_unread_dot,
@@ -6167,6 +6257,7 @@ fn break_tabs_into_new_workspace(
             path_label,
             card,
             statuses: workspace_card::StatusMap::default(),
+            program_status: HashMap::new(),
             description: None,
             indicator_button,
             indicator_unread_dot,
@@ -7930,6 +8021,7 @@ fn add_workspace_with_initial_command(
         path_label,
         card,
         statuses: workspace_card::StatusMap::default(),
+        program_status: HashMap::new(),
         description: workspace.description.clone(),
         indicator_button,
         indicator_unread_dot,
@@ -8126,6 +8218,21 @@ pub(crate) fn create_pane_for_workspace(
                 }
             });
         }),
+        on_program_status: Box::new({
+            let state = state.clone();
+            let ws_id = ws_id.to_string();
+            move |tab_id: &str, report| {
+                let state = state.clone();
+                let ws_id = ws_id.clone();
+                let tab_id = tab_id.to_string();
+                glib::idle_add_local_once(move || {
+                    let mut s = state.borrow_mut();
+                    if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == ws_id) {
+                        apply_program_status(ws, &tab_id, report);
+                    }
+                });
+            }
+        }),
         on_empty: Box::new(move |pane_widget, reason| {
             if should_keep_workspace_open_for_empty_pane(&state_for_empty, &ws_id_empty, reason) {
                 request_session_save(&state_for_empty);
@@ -8139,7 +8246,23 @@ pub(crate) fn create_pane_for_workspace(
         }),
         on_state_changed: Box::new({
             let state = state.clone();
-            move || request_session_save(&state)
+            let ws_id = ws_id.to_string();
+            move || {
+                request_session_save(&state);
+                // A closed tab takes its program status records with it.
+                let state = state.clone();
+                let ws_id = ws_id.clone();
+                glib::idle_add_local_once(move || {
+                    let mut s = state.borrow_mut();
+                    if let Some(ws) = s
+                        .workspaces
+                        .iter_mut()
+                        .find(|w| w.id == ws_id && !w.program_status.is_empty())
+                    {
+                        refresh_program_status_row(ws, "tab change");
+                    }
+                });
+            }
         }),
         on_unread_changed: Box::new(move || {
             sync_workspace_unread(&state_for_unread, &ws_id_unread);
@@ -10509,6 +10632,7 @@ mod tests {
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
                 on_title_changed: Box::new(|_| {}),
+                on_program_status: Box::new(|_, _| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
