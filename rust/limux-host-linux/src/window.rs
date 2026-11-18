@@ -4074,6 +4074,8 @@ struct CardWidgets {
     description_label: gtk::Label,
     branch_label: gtk::Label,
     status_box: gtk::Box,
+    /// The `pr` status row, shown under the path as cmux shows pull requests.
+    pr_box: gtk::Box,
 }
 
 /// Everything `build_sidebar_row` creates that the workspace keeps a handle to.
@@ -4142,17 +4144,16 @@ fn build_sidebar_row(
         path_label.set_label("");
     }
 
-    // The git branch sits in front of the path, like cmux's "branch  ~/path" row.
+    // The git branch on its own line above the path, cmux's default layout.
     let branch_label = gtk::Label::builder()
         .xalign(0.0)
         .margin_start(8)
         .visible(false)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .max_width_chars(24)
         .build();
     branch_label.add_css_class(workspace_card::BRANCH_CSS_CLASS);
 
-    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let path_row = gtk::Box::new(gtk::Orientation::Vertical, 0);
     path_row.append(&branch_label);
     path_row.append(&path_label);
     set_workspace_path_row_visibility(&path_label, folder_path, show_workspace_path);
@@ -4173,6 +4174,12 @@ fn build_sidebar_row(
         .visible(false)
         .build();
     status_box.add_css_class(workspace_card::STATUS_BOX_CSS_CLASS);
+    let pr_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .visible(false)
+        .build();
+    pr_box.add_css_class(workspace_card::STATUS_BOX_CSS_CLASS);
 
     let notify_label = gtk::Label::builder()
         .xalign(0.0)
@@ -4187,11 +4194,14 @@ fn build_sidebar_row(
         .spacing(2)
         .build();
     vbox.add_css_class("limux-sidebar-row-box");
+    // cmux's order: title, description, latest notification, status rows,
+    // branch, path, pull request.
     vbox.append(&top_row);
     vbox.append(&description_label);
-    vbox.append(&path_row);
-    vbox.append(&status_box);
     vbox.append(&notify_label);
+    vbox.append(&status_box);
+    vbox.append(&path_row);
+    vbox.append(&pr_box);
 
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&vbox));
@@ -4208,6 +4218,7 @@ fn build_sidebar_row(
             description_label,
             branch_label,
             status_box,
+            pr_box,
         },
     }
 }
@@ -4227,8 +4238,10 @@ fn render_workspace_card(workspace: &Workspace) {
             card.description_label.set_visible(false);
         }
     }
-    while let Some(child) = card.status_box.first_child() {
-        card.status_box.remove(&child);
+    for status_box in [&card.status_box, &card.pr_box] {
+        while let Some(child) = status_box.first_child() {
+            status_box.remove(&child);
+        }
     }
     for entry in workspace.statuses.sorted() {
         let label = gtk::Label::builder()
@@ -4239,15 +4252,22 @@ fn render_workspace_card(workspace: &Workspace) {
         label.set_markup(&workspace_card::status_row_markup(entry));
         label.set_tooltip_text(Some(&format!("{}: {}", entry.key, entry.value)));
         label.add_css_class(workspace_card::STATUS_ROW_CSS_CLASS);
-        card.status_box.append(&label);
+        // cmux lists pull requests after the branch and path.
+        if entry.key == "pr" {
+            card.pr_box.append(&label);
+        } else {
+            card.status_box.append(&label);
+        }
     }
-    card.status_box.set_visible(!workspace.statuses.is_empty());
+    for status_box in [&card.status_box, &card.pr_box] {
+        status_box.set_visible(status_box.first_child().is_some());
+    }
     refresh_workspace_location(workspace);
 }
 
 /// Show the workspace's current directory (once a shell has reported one; until
-/// then the folder it was opened in) and that directory's git branch, like
-/// cmux's "branch  ~/path" row.
+/// then the folder it was opened in) and that directory's git branch, on
+/// separate lines like cmux's default card.
 fn refresh_workspace_location(workspace: &Workspace) {
     if let Some(cwd) = workspace.cwd.borrow().as_deref() {
         workspace.path_label.set_label(&abbreviate_path(cwd));
@@ -4264,10 +4284,6 @@ fn refresh_workspace_location(workspace: &Workspace) {
     let label = &workspace.card.branch_label;
     match branch {
         Some(branch) => {
-            // Ask for room for up to 18 characters so the branch keeps its
-            // name and the path is the one that gets shortened.
-            let wanted = branch.chars().count().min(18) as i32;
-            label.set_width_chars(wanted);
             label.set_label(&branch);
             label.set_tooltip_text(Some(&format!("git branch {branch}")));
             label.set_visible(true);

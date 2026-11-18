@@ -84,6 +84,7 @@ impl StatusMap {
         }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
