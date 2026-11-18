@@ -412,6 +412,7 @@ pub(super) fn snapshot_session_state(state: &State) -> AppSessionState {
                 folder_path,
                 autostart_command: workspace.autostart_command.borrow().clone(),
                 color: workspace.color,
+                description: workspace.description.clone(),
                 group_id: s
                     .sidebar
                     .group_of(&workspace.id)

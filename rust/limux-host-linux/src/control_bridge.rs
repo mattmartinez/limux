@@ -242,6 +242,12 @@ pub enum ControlCommand {
         color: Option<WorkspaceColor>,
         reply: mpsc::Sender<BridgeResult>,
     },
+    /// `workspace.set_status`, `clear_status`, `list_status`, `set_description`.
+    WorkspaceCard {
+        target: WorkspaceTarget,
+        request: crate::workspace_card::CardRequest,
+        reply: mpsc::Sender<BridgeResult>,
+    },
     CloseWorkspace {
         target: WorkspaceTarget,
         reply: mpsc::Sender<BridgeResult>,
@@ -349,6 +355,7 @@ impl ControlCommand {
             | Self::LastWorkspace { reply }
             | Self::RenameWorkspace { reply, .. }
             | Self::SetWorkspaceColor { reply, .. }
+            | Self::WorkspaceCard { reply, .. }
             | Self::CloseWorkspace { reply, .. }
             | Self::WorkspaceGroup { reply, .. }
             | Self::GuiHook { reply, .. }
@@ -1384,6 +1391,28 @@ fn handle_method(
                 ControlCommand::SetWorkspaceColor {
                     target,
                     color,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "workspace.set_status"
+        | "workspace.clear_status"
+        | "workspace.list_status"
+        | "workspace.set_description" => {
+            let request = match crate::workspace_card::parse_card_request(method, params) {
+                Ok(request) => request,
+                Err(message) => return error_response(id, BridgeError::invalid_params(message)),
+            };
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::WorkspaceCard {
+                    target,
+                    request,
                     reply,
                 },
                 rx,

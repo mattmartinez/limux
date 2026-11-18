@@ -266,6 +266,46 @@ before running it again, then merge any project policies you want to keep.
 `limux --json agent-team --dry-run` previews the protocol in `agents_md_preview`
 without writing files or contacting the host.
 
+### Workspace cards
+
+Each workspace card in the sidebar can carry more than its name, the way cmux
+cards do. Agents, hooks and scripts write it over the socket; inside a Limux
+terminal the commands target their own workspace through `LIMUX_WORKSPACE_ID`.
+
+```bash
+# Keyed status rows, highest priority first. The flags match `cmux set-status`.
+limux set-status claude Running --icon bolt.fill --color '#5c9cf5' --priority 10
+limux set-status build "tests passing" --icon checkmark --color green
+limux clear-status build          # one row; `clear-status` alone clears them all
+limux list-status
+
+# A free-text line under the title; also "Edit Description…" in the card menu.
+limux set-description "PROD DEPLOYS STILL PENDING"
+limux set-description --clear
+
+# Show the branch's pull request (needs `gh`) as the `pr` row.
+limux refresh-pr
+```
+
+- **Status rows** are kept in memory only: they describe a running agent, so
+  they are gone after a restart. A workspace holds up to 16. Values are plain
+  text; `--icon` takes a few cmux SF Symbol names (`bolt.fill`,
+  `pause.circle.fill`, `bell.fill`, `checkmark`, `arrow.triangle.pull`, ...) or
+  up to four characters, and `--color` takes `#rrggbb` or a name.
+- **The description** is saved with the session.
+- **The git branch** of the workspace's current directory is shown in front of
+  its path, read from `.git/HEAD` (worktrees included) without running git.
+- **Agent lifecycle.** The hooks from `limux hooks setup` set a row under the
+  agent's own key: Running when a prompt is submitted, Needs input on a
+  notification, Idle when a turn ends, and remove it when the session ends.
+  After each turn they start `limux refresh-pr` in the background. Opt out with
+  `LIMUX_CARD_STATUS_DISABLED=1` (rows) or `LIMUX_PR_STATUS_DISABLED=1` (PR row).
+- **oh-my-pi (omp).** Copy [`hooks/omp-limux-card.ts`](hooks/omp-limux-card.ts)
+  to `~/.omp/agent/extensions/`. It sets the `omp` row, posts a notification
+  with the start of omp's reply when a turn ends, and does nothing outside Limux.
+- `limux --json list-workspaces` includes each workspace's `description`,
+  `statuses` and `git_branch`.
+
 Checked-in hook templates live in [`hooks/`](hooks/). They mirror
 `limux hooks setup` for Codex, Claude Code, and Gemini CLI; OpenCode is
 omitted from default `limux hooks setup` and can be installed explicitly with

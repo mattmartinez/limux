@@ -22,6 +22,7 @@ mod ssh_transfer;
 mod tab_activity;
 mod terminal;
 mod window;
+mod workspace_card;
 mod workspace_color;
 mod workspace_group;
 mod x11_cursor_errors;

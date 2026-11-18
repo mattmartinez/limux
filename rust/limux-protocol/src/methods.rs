@@ -239,9 +239,13 @@ pub const CORE_COMMAND_NAMES: [&str; 166] = [
     "debug.window.screenshot",
 ];
 
-pub const HOST_ONLY_COMMAND_NAMES: [&str; 12] = [
+pub const HOST_ONLY_COMMAND_NAMES: [&str; 16] = [
     "window.activate",
     "workspace.set_color",
+    "workspace.set_status",
+    "workspace.clear_status",
+    "workspace.list_status",
+    "workspace.set_description",
     "workspace.set_group",
     "workspace.group_list",
     "workspace.group_create",
@@ -254,7 +258,7 @@ pub const HOST_ONLY_COMMAND_NAMES: [&str; 12] = [
     "gui_hook.clear",
 ];
 
-pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
+pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 54] = [
     "system.ping",
     "system.identify",
     "system.capabilities",
@@ -269,6 +273,10 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
     "workspace.rename",
     "workspace.close",
     "workspace.set_color",
+    "workspace.set_status",
+    "workspace.clear_status",
+    "workspace.list_status",
+    "workspace.set_description",
     "workspace.set_group",
     "workspace.group_list",
     "workspace.group_create",
@@ -307,7 +315,7 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 50] = [
     "browser.reload",
 ];
 
-pub const ALL_METHOD_SPECS: [MethodSpec; 178] = [
+pub const ALL_METHOD_SPECS: [MethodSpec; 182] = [
     shared_spec("system.ping", MethodCategory::System, &["ping"], &[]),
     shared_spec(
         "system.identify",
@@ -386,6 +394,30 @@ pub const ALL_METHOD_SPECS: [MethodSpec; 178] = [
         MethodCategory::Workspace,
         &["set-workspace-color"],
         &["set-workspace-color"],
+    ),
+    gtk_bridge_only_spec(
+        "workspace.set_status",
+        MethodCategory::Workspace,
+        &["set-status"],
+        &["set-status"],
+    ),
+    gtk_bridge_only_spec(
+        "workspace.clear_status",
+        MethodCategory::Workspace,
+        &["clear-status"],
+        &["clear-status"],
+    ),
+    gtk_bridge_only_spec(
+        "workspace.list_status",
+        MethodCategory::Workspace,
+        &["list-status"],
+        &["list-status"],
+    ),
+    gtk_bridge_only_spec(
+        "workspace.set_description",
+        MethodCategory::Workspace,
+        &["set-description"],
+        &["set-description"],
     ),
     gtk_bridge_only_spec(
         "workspace.set_group",

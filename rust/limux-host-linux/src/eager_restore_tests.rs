@@ -36,6 +36,7 @@ fn workspace(name: &str, tabs: &[&str]) -> WorkspaceState {
         folder_path: None,
         autostart_command: None,
         color: None,
+        description: None,
         group_id: None,
         layout: LayoutNodeState::Pane(PaneState {
             pane_id: None,

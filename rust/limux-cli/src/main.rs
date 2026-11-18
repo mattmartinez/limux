@@ -16,6 +16,7 @@ use tokio::net::UnixStream;
 
 mod agent_hooks;
 mod agent_team_file;
+mod card;
 mod terminal_notifications;
 
 const CLI_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -234,6 +235,13 @@ Common commands:
       Supports terminal and browser panes on both the live GTK host and standalone server.
   rename-workspace [--workspace <id|ref>] <title>
   set-workspace-color [--workspace <id|ref>] <red|orange|amber|green|teal|blue|purple|pink|none>
+  set-status [--workspace <id|ref>] <key> <value> [--icon <name>] [--color <#hex|name>] [--priority <n>]
+      Add or replace one status row on the workspace card (cmux-compatible flags).
+  clear-status [--workspace <id|ref>] [<key>]   (no key clears every row)
+  list-status [--workspace <id|ref>]
+  set-description [--workspace <id|ref>] <text> | --clear
+  refresh-pr [--workspace <id|ref>] [--cwd <dir>]
+      Look up the branch's pull request with `gh` and show it as the `pr` row.
   list-groups
   create-group [--color <color>] [--workspace <id|ref>]... [<name>]
   rename-group --group <id|ref|name> <name>
@@ -1162,7 +1170,42 @@ async fn run_agent_hook(
         }
     }
 
+    update_agent_card(client, agent, args, &payload, &event).await;
+
     Ok(agent_hook_output(agent, &event, &payload))
+}
+
+/// Keep the agent's status row on its workspace card in step with the hook
+/// event (Running / Needs input / Idle), and refresh the `pr` row in the
+/// background after a turn. Only inside Limux, where the workspace is known;
+/// errors never fail the hook.
+async fn update_agent_card(
+    client: &mut Client,
+    agent: agent_hooks::AgentKind,
+    args: &[String],
+    payload: &Value,
+    event: &str,
+) {
+    if std::env::var("LIMUX_CARD_STATUS_DISABLED").is_ok_and(|value| value == "1") {
+        return;
+    }
+    let Some(workspace) = parse_opt(args, "--workspace")
+        .or_else(|| limux_env_value("LIMUX_WORKSPACE_ID"))
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    if let Some((method, params)) = card::lifecycle_params(agent.store_name(), event, &workspace) {
+        if let Err(error) = client.call(&method, params).await {
+            if terminal_notifications::forced() {
+                eprintln!("limux: status row not updated: {error:#}");
+            }
+        }
+    }
+    if card::refreshes_pr(event) {
+        let cwd = hook_str(payload, &["cwd", "working_directory", "directory"]).map(str::to_string);
+        card::spawn_pr_refresh(&workspace, cwd.as_deref());
+    }
 }
 
 fn agent_hook_output(agent: agent_hooks::AgentKind, event: &str, payload: &Value) -> Value {
@@ -4602,6 +4645,52 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
                 CommandOutput::Text("OK".to_string())
             }
         }
+        "set-status" | "clear-status" | "list-status" | "set-description" => {
+            let env_value = |name: &str| env::var(name).ok();
+            let (method, params) = match command {
+                "set-status" => (
+                    "workspace.set_status",
+                    card::build_set_status_params(args, env_value)?,
+                ),
+                "clear-status" => (
+                    "workspace.clear_status",
+                    card::build_clear_status_params(args, env_value)?,
+                ),
+                "list-status" => (
+                    "workspace.list_status",
+                    card::build_list_status_params(args, env_value)?,
+                ),
+                _ => (
+                    "workspace.set_description",
+                    card::build_set_description_params(args, env_value)?,
+                ),
+            };
+            let payload = client.call(method, params).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text(card::describe_result(command, &payload))
+            }
+        }
+        "refresh-pr" => {
+            let workspace = parse_opt(args, "--workspace")
+                .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
+                .ok_or_else(|| anyhow!("refresh-pr needs --workspace or LIMUX_WORKSPACE_ID"))?;
+            let cwd = parse_opt(args, "--cwd")
+                .map(PathBuf::from)
+                .or_else(|| env::current_dir().ok())
+                .ok_or_else(|| anyhow!("refresh-pr could not read the current directory"))?;
+            let lookup = card::lookup_pr(&cwd, Duration::from_secs(8)).await;
+            let payload = match card::pr_status_params(&lookup, &workspace) {
+                Some((method, params)) => client.call(&method, params).await?,
+                None => json!({ "skipped": "gh did not answer" }),
+            };
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else {
+                CommandOutput::Text(format!("{lookup:?}"))
+            }
+        }
         "set-workspace-color" => {
             let params = build_set_workspace_color_params(args, |name| env::var(name).ok())?;
             let payload = client.call("workspace.set_color", params).await?;
@@ -5436,6 +5525,12 @@ mod cli_arg_tests {
                     }
                     "set-workspace-color" => {
                         args(&["set-workspace-color", "--workspace", "ws-1", "blue"])
+                    }
+                    "set-status" => {
+                        args(&["set-status", "--workspace", "ws-1", "claude", "Running"])
+                    }
+                    "set-description" => {
+                        args(&["set-description", "--workspace", "ws-1", "Deploy pending"])
                     }
                     "set-workspace-group" => {
                         args(&["set-workspace-group", "--workspace", "ws-1", "Ops"])

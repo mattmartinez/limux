@@ -27,9 +27,11 @@ use crate::shortcut_config::{
     self, EditableCapturePolicy, ResolvedShortcutConfig, ShortcutCommand, ShortcutId,
 };
 use crate::split_tree::{self, SplitTreeContainer};
+use crate::workspace_card;
 use crate::workspace_color::{self, WorkspaceColor};
 use crate::workspace_group::{Placement, RowRef, SidebarLayout};
 
+mod description_dialog;
 mod gui_hooks;
 mod navigation_notifications;
 mod session_persistence;
@@ -77,6 +79,12 @@ struct Workspace {
     autostart_command: Rc<RefCell<Option<String>>>,
     /// Path label shown below workspace name in sidebar.
     path_label: gtk::Label,
+    /// Description, status rows and branch on the sidebar card (see `workspace_card`).
+    card: CardWidgets,
+    /// Agent-written status rows; in memory only.
+    statuses: workspace_card::StatusMap,
+    /// The user's one-line description of the workspace; saved with the session.
+    description: Option<String>,
     /// The workspace indicator pill in the top bar.
     indicator_button: gtk::Button,
     /// The unread dot inside the indicator pill.
@@ -377,6 +385,9 @@ fn workspace_row(state: &AppState, index: usize, workspace: &Workspace) -> serde
         "focused": index == selected_idx,
         "cwd": cwd,
         "color": workspace.color.map(WorkspaceColor::as_str),
+        "description": workspace.description.as_deref(),
+        "statuses": workspace.statuses.to_json(),
+        "git_branch": workspace.card.branch_label.is_visible().then(|| workspace.card.branch_label.label().to_string()),
         "group_id": state.sidebar.group_of(&workspace.id).map(|group| group.id.as_str()),
         "group_ref": state
             .sidebar
@@ -1781,6 +1792,13 @@ pub fn build_window(app: &adw::Application) {
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    let card_provider = gtk::CssProvider::new();
+    card_provider.load_from_data(workspace_card::card_css());
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &card_provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
     let swatch_provider = gtk::CssProvider::new();
@@ -4036,19 +4054,30 @@ fn update_indicator_label(button: &gtk::Button, name: &str) {
 // Sidebar row
 // ---------------------------------------------------------------------------
 
+/// Widgets of the card on a sidebar row that agents and the user can fill in.
+struct CardWidgets {
+    description_label: gtk::Label,
+    branch_label: gtk::Label,
+    status_box: gtk::Box,
+}
+
+/// Everything `build_sidebar_row` creates that the workspace keeps a handle to.
+struct SidebarRowWidgets {
+    row: gtk::ListBoxRow,
+    name_label: gtk::Label,
+    favorite_button: gtk::Button,
+    notify_dot: gtk::Label,
+    notify_label: gtk::Label,
+    path_label: gtk::Label,
+    close_button: gtk::Button,
+    card: CardWidgets,
+}
+
 fn build_sidebar_row(
     name: &str,
     folder_path: Option<&str>,
     show_workspace_path: bool,
-) -> (
-    gtk::ListBoxRow,
-    gtk::Label,
-    gtk::Button,
-    gtk::Label,
-    gtk::Label,
-    gtk::Label,
-    gtk::Button,
-) {
+) -> SidebarRowWidgets {
     let notify_dot = gtk::Label::builder().label("\u{25CF}").build();
     notify_dot.add_css_class("limux-notify-dot-hidden");
 
@@ -4098,9 +4127,37 @@ fn build_sidebar_row(
         path_label.set_label("");
     }
 
+    // The git branch sits in front of the path, like cmux's "branch  ~/path" row.
+    let branch_label = gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(8)
+        .visible(false)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(24)
+        .build();
+    branch_label.add_css_class(workspace_card::BRANCH_CSS_CLASS);
+
     let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    path_row.append(&branch_label);
     path_row.append(&path_label);
     set_workspace_path_row_visibility(&path_label, folder_path, show_workspace_path);
+
+    // A one-line description under the title, set by the user or a script.
+    let description_label = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .visible(false)
+        .margin_start(8)
+        .build();
+    description_label.add_css_class(workspace_card::DESCRIPTION_CSS_CLASS);
+
+    // Status rows written by agents (`limux set-status`), highest priority first.
+    let status_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .visible(false)
+        .build();
+    status_box.add_css_class(workspace_card::STATUS_BOX_CSS_CLASS);
 
     let notify_label = gtk::Label::builder()
         .xalign(0.0)
@@ -4116,13 +4173,15 @@ fn build_sidebar_row(
         .build();
     vbox.add_css_class("limux-sidebar-row-box");
     vbox.append(&top_row);
+    vbox.append(&description_label);
     vbox.append(&path_row);
+    vbox.append(&status_box);
     vbox.append(&notify_label);
 
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(&vbox));
 
-    (
+    SidebarRowWidgets {
         row,
         name_label,
         favorite_button,
@@ -4130,7 +4189,101 @@ fn build_sidebar_row(
         notify_label,
         path_label,
         close_button,
-    )
+        card: CardWidgets {
+            description_label,
+            branch_label,
+            status_box,
+        },
+    }
+}
+
+/// Draw a workspace's description, status rows and branch on its card.
+fn render_workspace_card(workspace: &Workspace) {
+    let card = &workspace.card;
+    match workspace.description.as_deref() {
+        Some(text) => {
+            card.description_label.set_label(text);
+            card.description_label.set_tooltip_text(Some(text));
+            card.description_label.set_visible(true);
+        }
+        None => {
+            card.description_label.set_label("");
+            card.description_label.set_tooltip_text(None);
+            card.description_label.set_visible(false);
+        }
+    }
+    while let Some(child) = card.status_box.first_child() {
+        card.status_box.remove(&child);
+    }
+    for entry in workspace.statuses.sorted() {
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .margin_start(8)
+            .build();
+        label.set_markup(&workspace_card::status_row_markup(entry));
+        label.set_tooltip_text(Some(&format!("{}: {}", entry.key, entry.value)));
+        label.add_css_class(workspace_card::STATUS_ROW_CSS_CLASS);
+        card.status_box.append(&label);
+    }
+    card.status_box.set_visible(!workspace.statuses.is_empty());
+    refresh_workspace_branch(workspace);
+}
+
+/// Show the git branch of the workspace's current directory (or its folder).
+fn refresh_workspace_branch(workspace: &Workspace) {
+    let dir = workspace
+        .cwd
+        .borrow()
+        .clone()
+        .or_else(|| workspace.folder_path.clone());
+    let branch = dir
+        .as_deref()
+        .and_then(|dir| workspace_card::git_branch_for(std::path::Path::new(dir)));
+    let label = &workspace.card.branch_label;
+    match branch {
+        Some(branch) => {
+            // Ask for room for up to 18 characters so the branch keeps its
+            // name and the path is the one that gets shortened.
+            let wanted = branch.chars().count().min(18) as i32;
+            label.set_width_chars(wanted);
+            label.set_label(&branch);
+            label.set_tooltip_text(Some(&format!("git branch {branch}")));
+            label.set_visible(true);
+        }
+        None => {
+            label.set_label("");
+            label.set_visible(false);
+        }
+    }
+}
+
+/// Apply one card request from the control socket and describe the result.
+fn apply_card_request(
+    workspace: &mut Workspace,
+    request: workspace_card::CardRequest,
+) -> Result<serde_json::Value, BridgeError> {
+    use workspace_card::CardRequest;
+    let mut removed = 0;
+    match request {
+        CardRequest::SetStatus(entry) => {
+            workspace
+                .statuses
+                .set(entry)
+                .map_err(BridgeError::invalid_params)?;
+        }
+        CardRequest::ClearStatus(key) => removed = workspace.statuses.clear(key.as_deref()),
+        CardRequest::ListStatus => {}
+        CardRequest::SetDescription(description) => workspace.description = description,
+    }
+    render_workspace_card(workspace);
+    Ok(serde_json::json!({
+        "workspace_id": workspace.id.as_str(),
+        "workspace_ref": workspace_ref(&workspace.id),
+        "statuses": workspace.statuses.to_json(),
+        "description": workspace.description.as_deref(),
+        "removed": removed,
+    }))
 }
 
 fn workspace_path_visible(folder_path: Option<&str>, show_workspace_path: bool) -> bool {
@@ -4380,6 +4533,8 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
         "Set Autostart…"
     });
     autostart_btn.add_css_class("flat");
+    let description_btn = gtk::Button::with_label("Edit Description…");
+    description_btn.add_css_class("flat");
     let delete_btn = gtk::Button::with_label("Delete");
     delete_btn.add_css_class("flat");
     delete_btn.add_css_class("destructive-action");
@@ -4388,6 +4543,7 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
     menu_box.append(&unread_btn);
     menu_box.append(&rename_btn);
     menu_box.append(&autostart_btn);
+    menu_box.append(&description_btn);
 
     let current_color = {
         let app_state = state.borrow();
@@ -4531,6 +4687,17 @@ fn show_workspace_context_menu(state: &State, workspace_id: &str, row: &gtk::Lis
                 pop.popdown();
             }
             show_workspace_autostart_dialog(&state, &ws_id);
+        });
+    }
+    {
+        let state = state.clone();
+        let ws_id = workspace_id.to_string();
+        let pop = popover.downgrade();
+        description_btn.connect_clicked(move |_| {
+            if let Some(pop) = pop.upgrade() {
+                pop.popdown();
+            }
+            description_dialog::show_workspace_description_dialog(&state, &ws_id);
         });
     }
     {
@@ -5058,8 +5225,16 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         .borrow()
         .appearance
         .show_workspace_path;
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label, close_button) =
-        build_sidebar_row(&seed.name, seed.folder_path.as_deref(), show_workspace_path);
+    let SidebarRowWidgets {
+        row,
+        name_label,
+        favorite_button,
+        notify_dot,
+        notify_label,
+        path_label,
+        close_button,
+        card,
+    } = build_sidebar_row(&seed.name, seed.folder_path.as_deref(), show_workspace_path);
     // Wire close button
     {
         let state = state.clone();
@@ -5114,9 +5289,15 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             folder_path: seed.folder_path.clone(),
             autostart_command,
             path_label,
+            card,
+            statuses: workspace_card::StatusMap::default(),
+            description: None,
             indicator_button,
             indicator_unread_dot,
         });
+        if let Some(workspace) = app_state.workspaces.last() {
+            render_workspace_card(workspace);
+        }
         app_state
             .sidebar
             .push_workspace(new_workspace_id.clone(), false);
@@ -5661,6 +5842,7 @@ fn workspace_state_with_folder(name: &str, folder_path: &str) -> WorkspaceState 
         folder_path: Some(folder_path.to_string()),
         autostart_command: None,
         color: None,
+        description: None,
         group_id: None,
         layout: LayoutNodeState::Pane(PaneState::fallback(Some(folder_path))),
     }
@@ -5767,8 +5949,16 @@ fn break_tabs_into_new_workspace(
         .borrow()
         .appearance
         .show_workspace_path;
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label, close_button) =
-        build_sidebar_row(&seed.name, seed.folder_path.as_deref(), show_workspace_path);
+    let SidebarRowWidgets {
+        row,
+        name_label,
+        favorite_button,
+        notify_dot,
+        notify_label,
+        path_label,
+        close_button,
+        card,
+    } = build_sidebar_row(&seed.name, seed.folder_path.as_deref(), show_workspace_path);
     {
         let state = state.clone();
         let ws_id = new_workspace_id.clone();
@@ -5829,9 +6019,15 @@ fn break_tabs_into_new_workspace(
             folder_path: seed.folder_path.clone(),
             autostart_command,
             path_label,
+            card,
+            statuses: workspace_card::StatusMap::default(),
+            description: None,
             indicator_button,
             indicator_unread_dot,
         });
+        if let Some(workspace) = app_state.workspaces.last() {
+            render_workspace_card(workspace);
+        }
         app_state
             .sidebar
             .push_workspace(new_workspace_id.clone(), false);
@@ -6264,6 +6460,26 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             let _ = reply.send(result.ok_or_else(|| {
                 crate::control_bridge::BridgeError::not_found("workspace not found")
             }));
+        }
+        ControlCommand::WorkspaceCard {
+            target,
+            request,
+            reply,
+        } => {
+            let saves = matches!(request, workspace_card::CardRequest::SetDescription(_));
+            let result = {
+                let mut app_state = state.borrow_mut();
+                match workspace_index_for_target(&app_state, &target) {
+                    Some(index) => apply_card_request(&mut app_state.workspaces[index], request),
+                    None => Err(crate::control_bridge::BridgeError::not_found(
+                        "workspace not found",
+                    )),
+                }
+            };
+            if saves && result.is_ok() {
+                request_session_save(state);
+            }
+            let _ = reply.send(result);
         }
         ControlCommand::WorkspaceGroup { request, reply } => {
             let _ = reply.send(sidebar_groups::handle_group_request(state, request));
@@ -7397,6 +7613,7 @@ fn connect_ssh_target(
         folder_path: None,
         autostart_command: None,
         color: None,
+        description: None,
         group_id: None,
         layout: LayoutNodeState::Pane(
             connection
@@ -7484,12 +7701,20 @@ fn add_workspace_with_initial_command(
         .borrow()
         .appearance
         .show_workspace_path;
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label, close_button) =
-        build_sidebar_row(
-            &workspace.name,
-            workspace.folder_path.as_deref(),
-            show_workspace_path,
-        );
+    let SidebarRowWidgets {
+        row,
+        name_label,
+        favorite_button,
+        notify_dot,
+        notify_label,
+        path_label,
+        close_button,
+        card,
+    } = build_sidebar_row(
+        &workspace.name,
+        workspace.folder_path.as_deref(),
+        show_workspace_path,
+    );
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
     // Wire close button
@@ -7543,6 +7768,9 @@ fn add_workspace_with_initial_command(
         folder_path: workspace.folder_path.clone(),
         autostart_command,
         path_label,
+        card,
+        statuses: workspace_card::StatusMap::default(),
+        description: workspace.description.clone(),
         indicator_button,
         indicator_unread_dot,
     };
@@ -7551,6 +7779,7 @@ fn add_workspace_with_initial_command(
         set_workspace_favorite_visual(&ws, true);
     }
     set_workspace_color_visual(&ws);
+    render_workspace_card(&ws);
 
     {
         let mut s = state.borrow_mut();
@@ -7711,6 +7940,7 @@ pub(crate) fn create_pane_for_workspace(
                 let s = state.borrow();
                 if let Some(ws) = s.workspaces.iter().find(|w| w.id == ws_id) {
                     *ws.cwd.borrow_mut() = Some(pwd);
+                    refresh_workspace_branch(ws);
                 }
             });
         }),
@@ -9862,9 +10092,12 @@ mod tests {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
 
-        let (hidden_path_row, _, _, _, _, path_label, _) =
-            super::build_sidebar_row("Workspace", Some("/workspace"), false);
-        let (no_path_row, ..) = super::build_sidebar_row("Workspace", None, true);
+        let super::SidebarRowWidgets {
+            row: hidden_path_row,
+            path_label,
+            ..
+        } = super::build_sidebar_row("Workspace", Some("/workspace"), false);
+        let no_path_row = super::build_sidebar_row("Workspace", None, true).row;
         let row_height = |row: &gtk::ListBoxRow| row.measure(gtk::Orientation::Vertical, -1).0;
         let no_path_height = row_height(&no_path_row);
 

@@ -13,6 +13,7 @@ fn workspace(number: u32) -> WorkspaceState {
         folder_path: None,
         autostart_command: None,
         color: None,
+        description: None,
         group_id: None,
         layout: LayoutNodeState::Pane(PaneState {
             pane_id: Some(number),

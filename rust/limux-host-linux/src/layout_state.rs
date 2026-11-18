@@ -74,6 +74,9 @@ pub struct WorkspaceState {
         deserialize_with = "crate::workspace_color::deserialize_option"
     )]
     pub color: Option<WorkspaceColor>,
+    /// The user's one-line description of the workspace card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The sidebar group this workspace belongs to, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
@@ -478,6 +481,7 @@ impl AppSessionState {
                     folder_path: workspace.folder_path,
                     autostart_command: None,
                     color: None,
+                    description: None,
                     group_id: None,
                     // Legacy files only knew "workspace exists"; rehydrate a fresh terminal at the
                     // last known directory instead of pretending process state can be restored.
@@ -1093,6 +1097,7 @@ mod tests {
                 folder_path: Some("/canonical".to_string()),
                 autostart_command: None,
                 color: None,
+                description: None,
                 group_id: None,
                 layout: LayoutNodeState::Pane(PaneState::fallback(Some("/canonical"))),
             }],
@@ -1203,6 +1208,7 @@ mod tests {
                 folder_path: Some("/tmp".to_string()),
                 autostart_command: Some("ssh user@server".to_string()),
                 color: None,
+                description: None,
                 group_id: None,
                 layout: LayoutNodeState::Pane(PaneState::fallback(Some("/tmp"))),
             }],
@@ -1249,6 +1255,7 @@ mod tests {
             folder_path: None,
             autostart_command: None,
             color: Some(WorkspaceColor::Teal),
+            description: None,
             group_id: None,
             layout: LayoutNodeState::Pane(PaneState::fallback(None)),
         };
@@ -1283,6 +1290,7 @@ mod tests {
             folder_path: None,
             autostart_command: None,
             color: None,
+            description: None,
             group_id: Some("g".to_string()),
             layout: LayoutNodeState::Pane(PaneState::fallback(None)),
         };
@@ -1965,6 +1973,7 @@ mod tests {
                 folder_path: None,
                 autostart_command: None,
                 color: None,
+                description: None,
                 group_id: None,
                 layout: LayoutNodeState::Pane(PaneState {
                     pane_id: None,
