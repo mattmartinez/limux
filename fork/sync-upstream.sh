@@ -14,7 +14,7 @@
 #   2. merge into main with a merge commit; a conflict stops here for a human
 #   3. Zig 0.16.0 for Ghostty (downloaded and checked once, into .tools/)
 #   4. rebuild Ghostty if the submodule moved
-#   5. scripts/check.sh under Xvfb, then fork/card-smoke.sh (18 live checks)
+#   5. scripts/check.sh under Xvfb, then fork/card-smoke.sh (21 live checks)
 #   6. makepkg in fork/
 # Merging, not rebasing, so main's history is never rewritten and pushes never
 # need force.

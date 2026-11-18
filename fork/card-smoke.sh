@@ -55,7 +55,7 @@ if [ -n "${CARD_SMOKE_SEED_SESSION:-}" ]; then cp "$CARD_SMOKE_SEED_SESSION" "$X
 
 # a git repo for the branch row
 REPO="$HOME/work/demo-repo"
-mkdir -p "$REPO" && git -C "$REPO" init -q -b CD-3898-card-demo && git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+mkdir -p "$REPO" && git -C "$REPO" init -q -b card-demo && git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
 
 CLI="${CARD_SMOKE_CLI:-$ROOT/target/debug/limux-cli}"
 HOST="${CARD_SMOKE_HOST:-$ROOT/target/debug/limux}"
@@ -105,7 +105,7 @@ shot 02-card-full
 J=$(cli --json list-workspaces | jq -c --arg ws "$WS2" '.workspaces[] | select(.ref == $ws)')
 check "list-workspaces shows the description" "[ \"\$(jq -r .description <<<'$J')\" = 'PROD DEPLOYS STILL PENDING' ]"
 check "status rows come back sorted by priority" "[ \"\$(jq -r '[.statuses[].key] | join(\",\")' <<<'$J')\" = 'claude,program,pr' ]"
-check "git branch of the workspace folder is reported" "[ \"\$(jq -r .git_branch <<<'$J')\" = 'CD-3898-card-demo' ]"
+check "git branch of the workspace folder is reported" "[ \"\$(jq -r .git_branch <<<'$J')\" = 'card-demo' ]"
 check "list-status text output" "cli list-status --workspace '$WS2' | grep -q 'claude	Running'"
 
 cli set-status --workspace "$WS2" claude "Needs input" --icon bell.fill --color amber --priority 10 >/dev/null
@@ -165,6 +165,36 @@ J2=$(cli --json list-workspaces | jq -c '[.workspaces[] | select(.description !=
 check "description restored after restart" "[ \"\$(jq -r '.[0].description' <<<'$J2')\" = 'PROD DEPLOYS STILL PENDING' ]"
 check "status rows are not restored" "[ \"\$(jq '.[0].statuses | length' <<<'$J2')\" = 0 ]"
 shot 05-after-restart
+
+# A restored agent tab ends in a login shell that must still report its folder,
+# so cd moves the card's path and branch. Real bash with Ghostty's default shell
+# integration, one workspace whose tab resumes a stand-in agent (/usr/bin/true).
+stop_host
+printf 'font-size = 12\n' > "$XDG_CONFIG_HOME/ghostty/config"
+printf 'PS1="smoke> "\n' > "$HOME/.bashrc"
+printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > "$HOME/.bash_profile"
+S="$XDG_DATA_HOME/limux/session.json"
+jq --arg h "$HOME" '.workspaces = [.workspaces[0]] | .workspaces[0].cwd = $h | .workspaces[0].folder_path = $h
+  | .workspaces[0].layout.tabs = [.workspaces[0].layout.tabs[0] | .cwd = $h | .agent = {kind: "codex",
+    session_id: "smoke-session", cwd: $h, restore_on_startup: true, launch_command: {executable: "/usr/bin/true",
+    arguments: ["/usr/bin/true"], cwd: $h, environment: {}, captured_at: 1}}]
+  | .workspaces[0].layout.active_tab_id = .workspaces[0].layout.tabs[0].id' "$S" > "$S.new" && mv "$S.new" "$S"
+export SHELL=/usr/bin/bash
+unset ENV
+start_host host3.log
+for _ in $(seq 1 100); do cli identify >/dev/null 2>&1 && break; sleep 0.2; done
+sleep 4
+cli send "cd $REPO" >/dev/null && cli send-key Enter >/dev/null
+sleep 2
+cli send 'echo "posix=$(set -o | awk '"'"'$1=="posix"{print $2}'"'"') prompt=[$PS1] hook=$(declare -F __ghostty_precmd)" > "$HOME/restored-shell.txt"' >/dev/null
+cli send-key Enter >/dev/null
+sleep 1.5
+J3=$(cli --json list-workspaces | jq -c '.workspaces[0]')
+check "restored agent tab: cd moves the card's folder" "[ \"\$(jq -r .cwd <<<'$J3')\" = '$REPO' ]"
+check "restored agent tab: cd shows the branch" "[ \"\$(jq -r .git_branch <<<'$J3')\" = 'card-demo' ]"
+check "restored agent tab: shell left POSIX mode and read its startup files" \
+  "grep -qxF 'posix=off prompt=[smoke> ] hook=__ghostty_precmd' '$HOME/restored-shell.txt'"
+shot 06-restored-agent-tab
 
 stop_host
 sleep 1
