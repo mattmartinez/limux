@@ -55,6 +55,7 @@ unsafe impl Sync for GhosttyState {}
 static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 static CURRENT_COLOR_SCHEME: AtomicI32 = AtomicI32::new(GHOSTTY_COLOR_SCHEME_LIGHT);
 static CURRENT_SCROLLBAR_ENABLED: AtomicBool = AtomicBool::new(true);
+static CURRENT_SHELL_INTEGRATION_ENABLED: AtomicBool = AtomicBool::new(true);
 static CURRENT_AUTOSTART_SHELL_KIND: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(1);
 static GHOSTTY_WAKEUP: LazyLock<wakeup::Wakeup> = LazyLock::new(wakeup::Wakeup::default);
@@ -831,6 +832,8 @@ pub fn init_ghostty() {
         let config = load_ghostty_config();
         let background_opacity = load_background_opacity(config);
         CURRENT_SCROLLBAR_ENABLED.store(load_scrollbar_enabled(config), Ordering::Relaxed);
+        CURRENT_SHELL_INTEGRATION_ENABLED
+            .store(load_shell_integration_enabled(config), Ordering::Relaxed);
         CURRENT_AUTOSTART_SHELL_KIND.store(load_autostart_shell_kind(config), Ordering::Relaxed);
 
         let runtime_config = ghostty_runtime_config_s {
@@ -888,6 +891,27 @@ fn load_background_opacity(config: ghostty_config_t) -> f64 {
     } else {
         1.0
     }
+}
+
+/// False only when the Ghostty config says `shell-integration = none`.
+pub(crate) fn terminal_shell_integration_enabled() -> bool {
+    init_ghostty();
+    CURRENT_SHELL_INTEGRATION_ENABLED.load(Ordering::Relaxed)
+}
+
+fn load_shell_integration_enabled(config: ghostty_config_t) -> bool {
+    let mut value: *const c_char = ptr::null();
+    let key = b"shell-integration";
+    let loaded = unsafe {
+        ghostty_config_get(
+            config,
+            (&mut value as *mut *const c_char).cast::<c_void>(),
+            key.as_ptr().cast::<c_char>(),
+            key.len(),
+        )
+    };
+
+    !loaded || value.is_null() || unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes() != b"none"
 }
 
 fn load_scrollbar_enabled(config: ghostty_config_t) -> bool {
@@ -1270,6 +1294,8 @@ unsafe extern "C" fn ghostty_action_cb(
         GHOSTTY_ACTION_RELOAD_CONFIG => {
             let config = load_ghostty_config();
             CURRENT_SCROLLBAR_ENABLED.store(load_scrollbar_enabled(config), Ordering::Relaxed);
+            CURRENT_SHELL_INTEGRATION_ENABLED
+                .store(load_shell_integration_enabled(config), Ordering::Relaxed);
             CURRENT_AUTOSTART_SHELL_KIND
                 .store(load_autostart_shell_kind(config), Ordering::Relaxed);
             match target.tag {

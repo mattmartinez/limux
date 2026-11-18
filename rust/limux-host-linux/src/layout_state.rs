@@ -162,7 +162,8 @@ pub struct RestorableAgentState {
 }
 
 impl RestorableAgentState {
-    pub fn resume_command(&self) -> Option<String> {
+    /// `shell_integration` is false when Ghostty's `shell-integration = none`.
+    pub fn resume_command(&self, shell_integration: bool) -> Option<String> {
         if !self.restore_on_startup {
             return None;
         }
@@ -171,6 +172,7 @@ impl RestorableAgentState {
             &self.session_id,
             self.launch_command.as_ref(),
             self.cwd.as_deref(),
+            shell_integration,
         )
     }
 }
@@ -860,17 +862,41 @@ fn build_resume_command(
     session_id: &str,
     launch: Option<&AgentLaunchCommandState>,
     cwd: Option<&str>,
+    shell_integration: bool,
 ) -> Option<String> {
     let session_id = normalized_str(session_id)?;
     let run_command =
         limux_control::agent_sessions::build_resume_command(kind, &session_id, launch, cwd)?;
-    Some(wrap_restored_agent_command(kind, &session_id, &run_command))
+    Some(wrap_restored_agent_command(
+        kind,
+        &session_id,
+        &run_command,
+        shell_integration,
+    ))
 }
+
+const PLAIN_LOGIN_SHELL: &str = "exec \"${SHELL:-/bin/sh}\" -l";
+
+/// Ghostty injects its shell integration only into a shell it starts itself, and
+/// a restored agent tab starts `/bin/sh -c`, so the login shell left after the
+/// agent exits had none: it never reported its directory, and the workspace card
+/// kept the restore-time folder and no branch. For bash, start it the way Ghostty
+/// does (POSIX mode, ENV pointing at ghostty.bash, which then runs the normal
+/// startup files). Other shells, or a missing script, start plain as before.
+const BASH_INTEGRATED_LOGIN_SHELL: &str = concat!(
+    "limux_ghostty_bash=\"${GHOSTTY_RESOURCES_DIR:-}/shell-integration/bash/ghostty.bash\"; ",
+    "if [ \"${SHELL##*/}\" = bash ] && [ -r \"$limux_ghostty_bash\" ]; then ",
+    "if [ -n \"${ENV+x}\" ]; then export GHOSTTY_BASH_ENV=\"$ENV\"; fi; ",
+    "if [ -z \"${HISTFILE+x}\" ]; then ",
+    "export HISTFILE=\"$HOME/.bash_history\" GHOSTTY_BASH_UNEXPORT_HISTFILE=1; fi; ",
+    "ENV=\"$limux_ghostty_bash\" GHOSTTY_BASH_INJECT=1 exec \"$SHELL\" --posix -l; fi; ",
+);
 
 fn wrap_restored_agent_command(
     kind: RestorableAgentKind,
     session_id: &str,
     run_command: &str,
+    shell_integration: bool,
 ) -> String {
     let payload = format!(
         "{{\"session_id\":{},\"hook_event_name\":\"Cleanup\"}}",
@@ -882,7 +908,12 @@ fn wrap_restored_agent_command(
         limux_control::agent_sessions::shell_single_quote(&limux_cli_executable()),
         kind.store_name()
     );
-    format!("{run_command}; limux_agent_status=$?; {cleanup}; exec \"${{SHELL:-/bin/sh}}\" -l")
+    let integrated = if shell_integration {
+        BASH_INTEGRATED_LOGIN_SHELL
+    } else {
+        ""
+    };
+    format!("{run_command}; limux_agent_status=$?; {cleanup}; {integrated}{PLAIN_LOGIN_SHELL}")
 }
 
 fn limux_cli_executable() -> String {
@@ -1396,7 +1427,7 @@ mod tests {
                 let agent = agent.as_ref().expect("agent metadata");
                 assert_eq!(agent.kind, RestorableAgentKind::Codex);
                 assert_eq!(agent.session_id, "session-a");
-                let command = agent.resume_command().expect("resume command");
+                let command = agent.resume_command(true).expect("resume command");
                 assert!(command.contains("cd '/tmp/project' && 'codex' 'resume' 'session-a'"));
                 assert!(command.contains("hooks codex cleanup"));
             }
@@ -1838,7 +1869,7 @@ mod tests {
             restore_on_startup: true,
         };
 
-        let command = agent.resume_command().expect("resume command");
+        let command = agent.resume_command(true).expect("resume command");
         assert!(command.contains("cd '/tmp/project' && 'codex' 'resume' 'sess-123'"));
         assert!(command.contains("hooks codex cleanup"));
         assert!(command.contains("exec \"${SHELL:-/bin/sh}\" -l"));
@@ -1854,7 +1885,106 @@ mod tests {
             restore_on_startup: false,
         };
 
-        assert_eq!(agent.resume_command(), None);
+        assert_eq!(agent.resume_command(true), None);
+    }
+
+    #[test]
+    fn restored_agent_command_ends_in_the_login_shell_tail() {
+        let with = wrap_restored_agent_command(RestorableAgentKind::Codex, "s", "true", true);
+        assert!(with.ends_with(&format!("{BASH_INTEGRATED_LOGIN_SHELL}{PLAIN_LOGIN_SHELL}")));
+        let without = wrap_restored_agent_command(RestorableAgentKind::Codex, "s", "true", false);
+        assert!(without.ends_with(&format!("; {PLAIN_LOGIN_SHELL}")));
+        assert!(!without.contains("ghostty.bash"));
+    }
+
+    /// Runs the login-shell tail under /bin/sh with a stand-in shell that prints
+    /// how it was started, instead of exec'ing a real shell.
+    fn login_shell_tail_run(
+        shell_integration: bool,
+        shell_name: &str,
+        with_script: bool,
+        extra_env: &[(&str, &str)],
+    ) -> String {
+        let dir = tempdir().unwrap();
+        let shell = dir.path().join(shell_name);
+        std::fs::write(
+            &shell,
+            concat!(
+                "#!/bin/sh\n",
+                "printf 'args=%s\\n' \"$*\"\n",
+                "printf 'ENV=%s\\n' \"${ENV-unset}\"\n",
+                "printf 'INJECT=%s\\n' \"${GHOSTTY_BASH_INJECT-unset}\"\n",
+                "printf 'SAVED_ENV=%s\\n' \"${GHOSTTY_BASH_ENV-unset}\"\n",
+                "printf 'HISTFILE=%s\\n' \"${HISTFILE-unset}\"\n",
+                "printf 'UNEXPORT=%s\\n' \"${GHOSTTY_BASH_UNEXPORT_HISTFILE-unset}\"\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resources = dir.path().join("ghostty");
+        if with_script {
+            let bash_dir = resources.join("shell-integration/bash");
+            std::fs::create_dir_all(&bash_dir).unwrap();
+            std::fs::write(bash_dir.join("ghostty.bash"), "# stand-in\n").unwrap();
+        }
+        let tail = if shell_integration {
+            format!("{BASH_INTEGRATED_LOGIN_SHELL}{PLAIN_LOGIN_SHELL}")
+        } else {
+            PLAIN_LOGIN_SHELL.to_string()
+        };
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&tail)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/home/probe")
+            .env("SHELL", &shell)
+            .env("GHOSTTY_RESOURCES_DIR", &resources)
+            .envs(extra_env.iter().copied())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .replace(&resources.to_string_lossy().to_string(), "<res>")
+    }
+
+    #[test]
+    fn restored_bash_gets_ghostty_shell_integration() {
+        let out = login_shell_tail_run(true, "bash", true, &[]);
+        assert_eq!(
+            out,
+            "args=--posix -l\nENV=<res>/shell-integration/bash/ghostty.bash\nINJECT=1\n\
+             SAVED_ENV=unset\nHISTFILE=/home/probe/.bash_history\nUNEXPORT=1\n"
+        );
+    }
+
+    #[test]
+    fn restored_bash_keeps_an_existing_env_and_histfile() {
+        let out = login_shell_tail_run(
+            true,
+            "bash",
+            true,
+            &[("ENV", "/x/env.sh"), ("HISTFILE", "/x/history")],
+        );
+        assert!(out.contains("args=--posix -l\n"), "{out}");
+        assert!(out.contains("SAVED_ENV=/x/env.sh\n"), "{out}");
+        assert!(
+            out.contains("HISTFILE=/x/history\nUNEXPORT=unset\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn restored_shell_starts_plain_without_bash_script_or_integration() {
+        let plain =
+            "args=-l\nENV=unset\nINJECT=unset\nSAVED_ENV=unset\nHISTFILE=unset\nUNEXPORT=unset\n";
+        // another shell
+        assert_eq!(login_shell_tail_run(true, "zsh", true, &[]), plain);
+        // Ghostty's bash script missing
+        assert_eq!(login_shell_tail_run(true, "bash", false, &[]), plain);
+        // shell-integration = none
+        assert_eq!(login_shell_tail_run(false, "bash", true, &[]), plain);
     }
 
     #[test]
@@ -2067,7 +2197,7 @@ mod tests {
             restore_on_startup: true,
         };
 
-        let command = agent.resume_command().expect("resume command");
+        let command = agent.resume_command(true).expect("resume command");
         assert!(command.contains(
             "cd '/tmp/project' && 'env' 'GEMINI_CLI_HOME=/tmp/gemini-home' 'gemini' '--resume' 'gem-sess-1' '--sandbox' '--config-dir' '/tmp/gemini-work' '--yolo' '--model' 'gemini-2.5-pro'"
         ));
@@ -2108,7 +2238,7 @@ mod tests {
             .agent_for_surface("ws-1", Some(7), "tab-agy")
             .expect("agy restorable state");
         assert_eq!(agent.kind, RestorableAgentKind::Agy);
-        let command = agent.resume_command().expect("agy resume command");
+        let command = agent.resume_command(true).expect("agy resume command");
         assert!(command.contains(
             "cd '/tmp/agy-repo' && 'agy' '--conversation' 'conv-99' '--sandbox' '--model' 'gemini-2.5-pro'"
         ));
