@@ -293,8 +293,9 @@ limux refresh-pr
   `pause.circle.fill`, `bell.fill`, `checkmark`, `arrow.triangle.pull`, ...) or
   up to four characters, and `--color` takes `#rrggbb` or a name.
 - **The description** is saved with the session.
-- **The git branch** of the workspace's current directory is shown in front of
-  its path, read from `.git/HEAD` (worktrees included) without running git.
+- **The git branch** of the workspace's current directory is shown on its own
+  line above its path, read from `.git/HEAD` (worktrees included) without
+  running git. A pull request row comes after the path.
 - **Agent lifecycle.** The hooks from `limux hooks setup` set a row under the
   agent's own key: Running when a prompt is submitted, Needs input on a
   notification, Idle when a turn ends, and remove it when the session ends.
