@@ -14,14 +14,18 @@ request on a workspace's sidebar card. The changes are described in the main
 
 ## Ghostty
 
-`main`'s `ghostty` submodule points at the branch `osc7501-program-status`: four commits on
-top of upstream's Ghostty pin that add OSC 7501 program status (upstream Ghostty's parser and
-cmux's embedder support, both taken from manaflow-ai/ghostty, plus a fix for Zig 0.16). They
-change Ghostty's action ABI, so the Rust bindings on `main` need them.
+`main`'s `ghostty` submodule comes from
+[mattmartinez/ghostty](https://github.com/mattmartinez/ghostty), a fork of upstream's
+bvolpato/ghostty, at the branch `osc7501-program-status`: four commits on top of upstream's
+Ghostty pin that add OSC 7501 program status (upstream Ghostty's parser and cmux's embedder
+support, both taken from manaflow-ai/ghostty, plus a fix for Zig 0.16). They change Ghostty's
+action ABI, so the Rust bindings on `main` need them. Inside `ghostty/`, `origin` is
+bvolpato/ghostty and `mattmartinez` is the fork. Upstream's release templates
+(`PKGBUILD-source.template`, `flatpak/`) still name bvolpato/ghostty; this fork does not use them.
 
 When upstream moves its Ghostty pin, the merge stops on the `ghostty` pointer. Rebase the four
 commits onto upstream's new pin inside `ghostty/`, rebuild with `scripts/build-ghostty.sh`,
-then commit the new pointer and finish the merge.
+push the branch to `mattmartinez`, then commit the new pointer and finish the merge.
 
 ## Keeping up with upstream
 
