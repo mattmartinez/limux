@@ -9,8 +9,19 @@ request on a workspace's sidebar card. The changes are described in the main
 
 | Branch | What it is |
 |---|---|
-| `main` | Upstream plus the card changes plus this `fork/` folder. This is what gets built and installed. |
-| `card-status` | Only the card changes on top of upstream, no `fork/` folder: the branch for a pull request to am-will/limux. |
+| `main` | Upstream plus the card changes, OSC 7501 program status, the browser GBM fallback and this `fork/` folder. This is what gets built and installed. |
+| `card-status` | Only the card changes on top of upstream, no `fork/` folder and no Ghostty changes: the branch for a pull request to am-will/limux. |
+
+## Ghostty
+
+`main`'s `ghostty` submodule points at the branch `osc7501-program-status`: four commits on
+top of upstream's Ghostty pin that add OSC 7501 program status (upstream Ghostty's parser and
+cmux's embedder support, both taken from manaflow-ai/ghostty, plus a fix for Zig 0.16). They
+change Ghostty's action ABI, so the Rust bindings on `main` need them.
+
+When upstream moves its Ghostty pin, the merge stops on the `ghostty` pointer. Rebase the four
+commits onto upstream's new pin inside `ghostty/`, rebuild with `scripts/build-ghostty.sh`,
+then commit the new pointer and finish the merge.
 
 ## Keeping up with upstream
 
@@ -30,7 +41,7 @@ The local remotes are `origin` (this fork) and `upstream` (am-will/limux, push d
 ## Building and installing by hand
 
 ```bash
-fork/card-smoke.sh                      # 21 live checks, isolated under Xvfb
+fork/card-smoke.sh                      # 34 live checks, isolated under Xvfb
 (cd fork && makepkg -f && git checkout PKGBUILD)  # package limux-card; makepkg rewrites pkgver=
 sudo pacman -U fork/limux-card-*.pkg.tar.zst
 ```

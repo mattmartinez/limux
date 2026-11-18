@@ -214,6 +214,52 @@ check "a name the user chose survives a title change" \
 check "the session saves the name as the user's" "[ \"\$(jq -r '.workspaces[0].named_by_user' '$S')\" = true ]"
 shot 07-named-workspace
 
+# OSC 7501 program status, as omp and Claude Code send it: the terminal answers
+# the support query, and the card shows the most urgent record as one row,
+# "app · message · percent", the way cmux does.
+W3=$(jq -r .ref <<<"$J3")
+cat > "$HOME/st.sh" <<'ST'
+# st.sh <report body> [seconds to keep the command running]
+printf '\033]7501;%s\033\\' "$1"
+if [ -n "${2:-}" ]; then sleep "$2"; fi
+ST
+cat > "$HOME/query.sh" <<'Q'
+printf '\033]7501;?\033\\'
+IFS= read -rs -t 2 -d '\' reply
+printf '%q\n' "$reply" > "$HOME/osc7501-reply.txt"
+Q
+pst() { cli --json list-status --workspace "$W3" | jq -r '[.statuses[] | select(.key=="program_status") | .value] | first // "none"'; }
+run() { cli send "$1" >/dev/null && cli send-key Enter >/dev/null; }
+run 'bash ~/query.sh'
+sleep 2
+check "OSC 7501: the terminal answers the support query" "grep -qF '7501;?' '$HOME/osc7501-reply.txt'"
+run 'bash ~/st.sh state=working:app=omp 4'
+sleep 1.5
+check "OSC 7501: a working report shows 'omp · Working'" "[ \"\$(pst)\" = 'omp · Working' ]"
+shot 08-program-status-working
+sleep 4
+check "OSC 7501: working ends at the next prompt" "[ \"\$(pst)\" = none ]"
+run 'bash ~/st.sh state=done:app=omp'
+sleep 1.5
+check "OSC 7501: done stays after the prompt" "[ \"\$(pst)\" = 'omp · Done' ]"
+run "bash ~/st.sh \"state=working:id=sync:progress=40:msg=\$(printf 'Syncing photos' | base64 -w0)\" 4"
+sleep 1.5
+check "OSC 7501: working outranks done, shows message and progress, inherits the app" "[ \"\$(pst)\" = 'omp · Syncing photos · 40%' ]"
+sleep 4
+check "OSC 7501: done comes back once the working record ends" "[ \"\$(pst)\" = 'omp · Done' ]"
+cli new-workspace --cwd "$HOME" >/dev/null 2>&1; sleep 1.5
+cli select-workspace --workspace "$W3" >/dev/null; sleep 1.5
+check "OSC 7501: done goes once the user is back in the tab" "[ \"\$(pst)\" = none ]"
+run 'bash ~/st.sh state=blocked:kind=permission:app=omp 4'
+sleep 1.5
+check "OSC 7501: a blocked report asks for permission" "[ \"\$(pst)\" = 'omp · Needs permission' ]"
+sleep 4
+run 'bash ~/st.sh state=done:app=omp'
+sleep 1.5
+run 'bash ~/st.sh state=clear'
+sleep 1.5
+check "OSC 7501: a clear report removes the row" "[ \"\$(pst)\" = none ]"
+
 stop_host
 sleep 1
 grep -i -E 'panic|critical|error' "$RUN"/host*.log | grep -v -i -E 'Gtk-WARNING|libEGL|MESA|dbind|portal' | head -5
