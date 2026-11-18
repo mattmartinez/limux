@@ -125,6 +125,7 @@ fn show_focused_workspace(state: &State, layout: LayoutNodeState) -> (String, gt
             group_id: None,
             id: None,
             name: "closed".to_string(),
+            named_by_user: None,
             favorite: false,
             cwd: None,
             folder_path: None,

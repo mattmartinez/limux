@@ -354,6 +354,69 @@ fn head_file_for(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Longest workspace name taken from a terminal title, in characters with the
+/// ellipsis (cmux's limit).
+const MAX_TERMINAL_TITLE_CHARS: usize = 256;
+
+/// The workspace name a terminal title gives, by cmux's rules
+/// (`AutomaticTerminalTitle` and `TerminalTitleChurnFilter`):
+/// - line and tab breaks become spaces;
+/// - a title with any other control or bidi-override character is refused;
+/// - it is cut to 256 characters;
+/// - a spinner frame standing alone as a word is dropped, so an agent's
+///   animated title settles on one name. Two or more glyphs in a row are
+///   art, not a spinner, and stay.
+///
+/// `None` when nothing usable is left.
+pub fn workspace_title_from_terminal(raw: &str) -> Option<String> {
+    let mut chars = Vec::new();
+    for c in raw.chars().take(MAX_TERMINAL_TITLE_CHARS + 1) {
+        match u32::from(c) {
+            0x09..=0x0D | 0x85 | 0x2028 | 0x2029 => chars.push(' '),
+            0x00..=0x1F | 0x7F..=0x9F | 0x202A..=0x202E | 0x2066..=0x2069 => return None,
+            _ => chars.push(c),
+        }
+    }
+    if chars.len() > MAX_TERMINAL_TITLE_CHARS {
+        chars.truncate(MAX_TERMINAL_TITLE_CHARS - 1);
+        chars.push('\u{2026}');
+    }
+
+    let glyph_run = chars
+        .windows(2)
+        .any(|pair| is_spinner_frame(pair[0]) && is_spinner_frame(pair[1]));
+    let standalone = |index: usize| {
+        (index == 0 || chars[index - 1].is_whitespace())
+            && chars.get(index + 1).is_none_or(|next| next.is_whitespace())
+    };
+    let kept: Vec<char> = chars
+        .iter()
+        .enumerate()
+        .filter(|&(index, &c)| glyph_run || !(is_spinner_frame(c) && standalone(index)))
+        .map(|(_, &c)| c)
+        .collect();
+    let title: String = if kept.len() == chars.len() {
+        kept.iter().collect::<String>().trim().to_string()
+    } else {
+        kept.iter()
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (!title.is_empty()).then_some(title)
+}
+
+/// A spinner frame: cmux's ✱..✽ stars and quarter-circle spinners, and any
+/// braille pattern. cmux names ten braille frames; a braille cell standing
+/// alone in a title is a spinner frame whichever set a program animates.
+fn is_spinner_frame(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x2800..=0x28FF | 0x2731..=0x273D | 0x25D0..=0x25D3 | 0x25F4..=0x25F7
+    )
+}
+
 /// CSS for the card rows. Muted like the path row; status rows wrap to one line each.
 pub fn card_css() -> &'static str {
     ".limux-ws-description { font-size: 0.85em; opacity: 0.85; }\n\
@@ -365,6 +428,42 @@ pub fn card_css() -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn terminal_titles_become_workspace_names_as_cmux_admits_them() {
+        let name = workspace_title_from_terminal;
+        assert_eq!(name("π > demo-repo").as_deref(), Some("π > demo-repo"));
+        assert_eq!(name("~/Work/demo").as_deref(), Some("~/Work/demo"));
+        assert_eq!(name("  vim  notes.md ").as_deref(), Some("vim  notes.md"));
+        assert_eq!(name("make\ttest\nnow").as_deref(), Some("make test now"));
+        assert_eq!(name("red \u{1b}[31m"), None);
+        assert_eq!(name("abc \u{202e}cba"), None);
+        assert_eq!(name("   "), None);
+        let long = name(&"x".repeat(300)).expect("a long title is cut, not refused");
+        assert_eq!(long.chars().count(), 256);
+        assert!(long.ends_with('\u{2026}'));
+        assert_eq!(
+            name(&"x".repeat(256)).as_deref(),
+            Some("x".repeat(256).as_str())
+        );
+    }
+
+    #[test]
+    fn an_agents_spinner_frames_settle_on_one_workspace_name() {
+        let name = workspace_title_from_terminal;
+        for frame in ["✳", "✶", "⠂", "⠐", "⠋", "◐"] {
+            assert_eq!(
+                name(&format!("{frame} Fix the card title")).as_deref(),
+                Some("Fix the card title"),
+                "frame {frame}"
+            );
+        }
+        assert_eq!(name("Fix it ⠙").as_deref(), Some("Fix it"));
+        assert_eq!(name("✳").as_deref(), None);
+        // Glyphs inside a word or in a row are text, not a spinner.
+        assert_eq!(name("a✳b").as_deref(), Some("a✳b"));
+        assert_eq!(name("⠋⠙ braille art").as_deref(), Some("⠋⠙ braille art"));
+    }
 
     fn parse(method: &str, params: serde_json::Value) -> Result<CardRequest, String> {
         parse_card_request(method, params.as_object().expect("test params are objects"))

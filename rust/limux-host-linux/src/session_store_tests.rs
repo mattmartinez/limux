@@ -8,6 +8,7 @@ fn workspace(number: u32) -> WorkspaceState {
     WorkspaceState {
         id: Some(format!("00000000-0000-4000-8000-{number:012}")),
         name: format!("workspace-{number}"),
+        named_by_user: None,
         favorite: false,
         cwd: Some("/tmp".into()),
         folder_path: None,

@@ -288,6 +288,8 @@ pub struct PaneCallbacks {
     pub current_shortcuts: Box<PaneShortcutStateCallback>,
     pub on_capture_shortcut: Rc<PaneShortcutCaptureCallback>,
     pub on_pwd_changed: Box<PanePathCallback>,
+    /// A terminal tab's title changed; the argument is the tab's id.
+    pub on_title_changed: Box<PanePathCallback>,
     pub on_empty: Box<PaneEmptyCallback>,
     pub on_state_changed: Box<PaneSignalCallback>,
     pub on_unread_changed: Box<PaneSignalCallback>,
@@ -1401,10 +1403,19 @@ impl TabEntry {
     fn rename(&mut self, title: &str) {
         let title = title.trim();
         self.custom_name = (!title.is_empty()).then(|| title.to_string());
+        // A terminal's automatic title is kept whole for the workspace name;
+        // the tab shows it shortened.
+        let automatic = self
+            .automatic_title
+            .as_deref()
+            .map(|title| match self.kind {
+                TabKind::Terminal { .. } => display_terminal_title(title),
+                _ => title.to_string(),
+            });
         self.title_label.set_text(
             self.custom_name
                 .as_deref()
-                .or(self.automatic_title.as_deref())
+                .or(automatic.as_deref())
                 .unwrap_or_else(|| self.kind.default_title()),
         );
     }
@@ -1628,6 +1639,7 @@ fn make_terminal_callbacks(
     let tid_for_title = tab_id.to_string();
     let title_label = title_label.clone();
     let state_for_title = internals.tab_state.clone();
+    let callbacks_for_title = internals.callbacks.clone();
     let callbacks_for_bell = internals.callbacks.clone();
     let callbacks_for_pwd = internals.callbacks.clone();
     let callbacks_for_browser_here = internals.callbacks.clone();
@@ -1668,14 +1680,14 @@ fn make_terminal_callbacks(
             if title.is_empty() {
                 return;
             }
-            let display = display_terminal_title(title);
             if let Some(entry) = state_for_title.borrow_mut().find_tab_mut(&tid_for_title) {
-                entry.automatic_title = Some(display.clone());
+                entry.automatic_title = Some(title.to_string());
                 if entry.custom_name.is_some() {
                     return;
                 }
             }
-            title_label.set_label(&display);
+            title_label.set_label(&display_terminal_title(title));
+            (callbacks_for_title.on_title_changed)(&tid_for_title);
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
             if terminal_tab_owner(&tid_for_pwd).is_some_and(|pane| {
@@ -2859,6 +2871,19 @@ pub fn tab_title(pane_widget: &gtk::Widget, tab_id: &str) -> Option<String> {
     let tab_state = internals.tab_state.borrow();
     let entry = tab_state.tabs.iter().find(|entry| entry.id == tab_id)?;
     Some(entry.title_label.label().to_string())
+}
+
+/// The whole title a tab carries for its workspace's name: the name the user
+/// gave the tab, else the title its terminal or page set. `None` before either
+/// exists, or when the pane holds no such tab.
+pub fn tab_title_for_workspace(pane_widget: &gtk::Widget, tab_id: &str) -> Option<String> {
+    let internals = find_pane_internals(pane_widget)?;
+    let tab_state = internals.tab_state.borrow();
+    let entry = tab_state.tabs.iter().find(|entry| entry.id == tab_id)?;
+    entry
+        .custom_name
+        .clone()
+        .or_else(|| entry.automatic_title.clone())
 }
 
 pub fn tab_working_directory(pane_widget: &gtk::Widget, tab_id: &str) -> Option<String> {
@@ -5122,6 +5147,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5265,6 +5291,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5388,6 +5415,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5518,6 +5546,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5671,6 +5700,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5823,6 +5853,7 @@ mod tests {
                 current_shortcuts: Box::new(move || shortcuts.clone()),
                 on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
                 on_pwd_changed: Box::new(|_| {}),
+                on_title_changed: Box::new(|_| {}),
                 on_empty: Box::new(|_, _| {}),
                 on_state_changed: Box::new(|| {}),
                 on_unread_changed: Box::new(|| {}),
@@ -5904,6 +5935,7 @@ mod tests {
             }),
             on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
             on_pwd_changed: Box::new(|_| {}),
+            on_title_changed: Box::new(|_| {}),
             on_empty: Box::new(|_, _| {}),
             on_state_changed: Box::new(|| {}),
             on_unread_changed: Box::new(|| {}),
@@ -5990,6 +6022,7 @@ mod tests {
             }),
             on_capture_shortcut: Rc::new(|_, _| Err(String::new())),
             on_pwd_changed: Box::new(|_| {}),
+            on_title_changed: Box::new(|_| {}),
             on_empty: Box::new(|_, _| {}),
             on_state_changed: Box::new(move || {
                 state_changes_cb.set(state_changes_cb.get() + 1);
