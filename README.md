@@ -1,8 +1,29 @@
-# Limux
+# Limux (mattmartinez fork)
 
-A GPU-accelerated terminal workspace manager for Linux, powered by Ghostty's rendering engine. A special thanks to the cmux contributors who inspired this build. 
+A fork of [am-will/limux](https://github.com/am-will/limux), the GPU-accelerated
+Linux terminal workspace manager powered by Ghostty. This fork brings the
+workspace sidebar closer to [cmux](https://github.com/manaflow-ai/cmux), the
+macOS app that inspired Limux.
 
-If you are on Mac, please visit https://github.com/manaflow-ai/cmux to download the original. 
+## What this fork adds
+
+- **cmux-style sidebar.** Black sidebar and window chrome, blue selection, and
+  workspace colors shown as a thin left rail rather than filling the card. The
+  top-bar workspace indicators are hidden.
+- **Workspace cards.** See the shell's current directory and Git branch,
+  latest notification, and linked pull request in the sidebar. Add a persistent
+  description or let agents and scripts post live status rows.
+- **Live program status.** The fork's Ghostty build supports OSC 7501, so tools
+  like oh-my-pi can show when they're working, need input, or have finished.
+- **Browser startup on multi-GPU NVIDIA systems.** A shared-memory rendering
+  fallback avoids a WebKit GBM startup abort on affected secondary GPUs.
+
+See [workspace card commands](#workspace-cards) and [fork build and packaging
+notes](fork/README.md).
+
+For this fork's features, [build this checkout from source](#build-from-source)
+or [build the Arch `limux-card` package](fork/README.md#building-and-installing-by-hand).
+The upstream downloads below do not include the fork's changes.
 
 https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
@@ -20,7 +41,7 @@ https://github.com/user-attachments/assets/6f3047c2-e2b6-49f2-b536-570a1570d0f8
 
 ## Install
 
-Download the latest release from [GitHub Releases](https://github.com/am-will/limux/releases).
+Download the upstream build from [GitHub Releases](https://github.com/am-will/limux/releases).
 
 **Debian/Ubuntu (.deb)** — recommended:
 ```bash
@@ -83,7 +104,7 @@ yay -S limux-bin
 yay -S limux
 ```
 
-Both [`limux-bin`](https://aur.archlinux.org/packages/limux-bin) and the source-built [`limux`](https://aur.archlinux.org/packages/limux) package are published from this repository. Thanks to [Anton Barchukov](https://github.com/antonbarchukov) for creating the original Arch packaging in [PR #50](https://github.com/am-will/limux/pull/50).
+Both [`limux-bin`](https://aur.archlinux.org/packages/limux-bin) and the source-built [`limux`](https://aur.archlinux.org/packages/limux) package are published by upstream. Thanks to [Anton Barchukov](https://github.com/antonbarchukov) for creating the original Arch packaging in [PR #50](https://github.com/am-will/limux/pull/50).
 
 To uninstall:
 ```bash
