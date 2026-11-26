@@ -5,6 +5,8 @@ Linux terminal workspace manager powered by Ghostty. This fork brings the
 workspace sidebar closer to [cmux](https://github.com/manaflow-ai/cmux), the
 macOS app that inspired Limux.
 
+![Limux with a blue selected workspace card and oh-my-pi running in the terminal](docs/limux-fork.png)
+
 ## What this fork adds
 
 - **cmux-style sidebar.** Black sidebar and window chrome, blue selection, and
