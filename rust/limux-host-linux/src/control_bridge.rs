@@ -27,7 +27,7 @@ const INTERNAL_ERROR_CODE: i64 = -32603;
 const NOT_FOUND_CODE: i64 = -32004;
 const CONFLICT_CODE: i64 = -32009;
 
-type BridgeResult = Result<Value, BridgeError>;
+pub(crate) type BridgeResult = Result<Value, BridgeError>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceTarget {
@@ -143,6 +143,9 @@ pub enum ControlCommand {
     },
     ActivateWindow {
         activation_token: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    SaveSession {
         reply: mpsc::Sender<BridgeResult>,
     },
     CurrentWorkspace {
@@ -335,6 +338,7 @@ impl ControlCommand {
         match self {
             Self::Identify { reply, .. }
             | Self::ActivateWindow { reply, .. }
+            | Self::SaveSession { reply }
             | Self::CurrentWorkspace { reply }
             | Self::ListWorkspaces { reply }
             | Self::ListPanes { reply, .. }
@@ -1051,6 +1055,10 @@ fn handle_method(
                 },
                 rx,
             )
+        }
+        "session.save" => {
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::SaveSession { reply }, rx)
         }
         "workspace.current" => {
             let (reply, rx) = mpsc::channel();
@@ -1811,12 +1819,37 @@ impl Drop for ConnectionSlot {
     }
 }
 
+fn command_needs_browser_sandbox(command: &ControlCommand) -> bool {
+    matches!(
+        command,
+        ControlCommand::CreateSurface { browser: true, .. }
+            | ControlCommand::CreatePane {
+                request: CreatePaneRequest {
+                    pane_type: PaneCreateType::Browser,
+                    ..
+                },
+                ..
+            }
+            | ControlCommand::BrowserOpenSplit { .. }
+            | ControlCommand::BrowserAction { .. }
+    )
+}
+
 /// Start the control socket server in a background thread and dispatch each
 /// command onto the GTK main context.
 pub fn start(dispatch: fn(ControlCommand)) {
     let context = glib::MainContext::default();
     let dispatch = std::sync::Arc::new(move |command: ControlCommand| {
-        context.invoke(move || dispatch(command));
+        let needs_browser_sandbox = command_needs_browser_sandbox(&command);
+        if needs_browser_sandbox {
+            let _ = crate::browser_sandbox::wait_for_availability_blocking();
+        }
+        context.invoke(move || {
+            if needs_browser_sandbox {
+                crate::browser_sandbox::flush_ready_waiters();
+            }
+            dispatch(command);
+        });
     });
 
     std::thread::Builder::new()
@@ -1949,6 +1982,39 @@ mod tests {
                 Some(INVALID_PARAMS_CODE)
             );
         }
+    }
+
+    #[test]
+    fn session_save_dispatches_to_gtk_host() {
+        let response = dispatch_request(
+            &json!({ "id": "save", "method": "session.save", "params": {} }).to_string(),
+            &|command| match command {
+                ControlCommand::SaveSession { reply } => {
+                    reply
+                        .send(Ok(json!({
+                            "saved": true,
+                            "path": "/tmp/session.json",
+                            "workspaces": 2,
+                            "tabs": 5,
+                            "restorable_agents": 3
+                        })))
+                        .unwrap();
+                }
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+        assert_eq!(response.error, None);
+        assert_eq!(response.id, Some(json!("save")));
+        assert_eq!(
+            response.result,
+            Some(json!({
+                "saved": true,
+                "path": "/tmp/session.json",
+                "workspaces": 2,
+                "tabs": 5,
+                "restorable_agents": 3
+            }))
+        );
     }
 
     #[test]
@@ -3081,5 +3147,70 @@ mod tests {
                 "{method}"
             );
         }
+    }
+
+    #[test]
+    fn command_needs_browser_sandbox_covers_browser_creation_and_actions() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(command_needs_browser_sandbox(
+            &ControlCommand::CreateSurface {
+                target: WorkspaceTarget::Active,
+                pane_hint: None,
+                browser: true,
+                url: None,
+                reply: tx.clone(),
+            }
+        ));
+        assert!(!command_needs_browser_sandbox(
+            &ControlCommand::CreateSurface {
+                target: WorkspaceTarget::Active,
+                pane_hint: None,
+                browser: false,
+                url: None,
+                reply: tx.clone(),
+            }
+        ));
+        assert!(command_needs_browser_sandbox(&ControlCommand::CreatePane {
+            request: CreatePaneRequest {
+                target: WorkspaceTarget::Active,
+                source_pane_id: None,
+                source_surface_id: None,
+                direction: PaneCreateDirection::Right,
+                pane_type: PaneCreateType::Browser,
+                command: None,
+                url: None,
+            },
+            reply: tx.clone(),
+        }));
+        assert!(!command_needs_browser_sandbox(
+            &ControlCommand::CreatePane {
+                request: CreatePaneRequest {
+                    target: WorkspaceTarget::Active,
+                    source_pane_id: None,
+                    source_surface_id: None,
+                    direction: PaneCreateDirection::Right,
+                    pane_type: PaneCreateType::Terminal,
+                    command: None,
+                    url: None,
+                },
+                reply: tx.clone(),
+            }
+        ));
+        assert!(command_needs_browser_sandbox(
+            &ControlCommand::BrowserOpenSplit {
+                target: WorkspaceTarget::Active,
+                surface_hint: None,
+                url: None,
+                reply: tx.clone(),
+            }
+        ));
+        assert!(command_needs_browser_sandbox(
+            &ControlCommand::BrowserAction {
+                target: WorkspaceTarget::Active,
+                surface_hint: None,
+                action: BrowserControlAction::Reload,
+                reply: tx,
+            }
+        ));
     }
 }

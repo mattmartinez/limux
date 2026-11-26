@@ -239,8 +239,9 @@ pub const CORE_COMMAND_NAMES: [&str; 166] = [
     "debug.window.screenshot",
 ];
 
-pub const HOST_ONLY_COMMAND_NAMES: [&str; 16] = [
+pub const HOST_ONLY_COMMAND_NAMES: [&str; 17] = [
     "window.activate",
+    "session.save",
     "workspace.set_color",
     "workspace.set_status",
     "workspace.clear_status",
@@ -258,11 +259,12 @@ pub const HOST_ONLY_COMMAND_NAMES: [&str; 16] = [
     "gui_hook.clear",
 ];
 
-pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 54] = [
+pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 55] = [
     "system.ping",
     "system.identify",
     "system.capabilities",
     "window.activate",
+    "session.save",
     "workspace.list",
     "workspace.current",
     "workspace.create",
@@ -315,7 +317,7 @@ pub const GTK_BRIDGE_COMMAND_NAMES: [&str; 54] = [
     "browser.reload",
 ];
 
-pub const ALL_METHOD_SPECS: [MethodSpec; 182] = [
+pub const ALL_METHOD_SPECS: [MethodSpec; 183] = [
     shared_spec("system.ping", MethodCategory::System, &["ping"], &[]),
     shared_spec(
         "system.identify",
@@ -337,6 +339,7 @@ pub const ALL_METHOD_SPECS: [MethodSpec; 182] = [
         &[],
         &["activate"],
     ),
+    gtk_bridge_only_spec("session.save", MethodCategory::App, &[], &["save-session"]),
     shared_spec(
         "workspace.list",
         MethodCategory::Workspace,
@@ -892,6 +895,12 @@ mod tests {
         assert_eq!(
             resolve_cli_subcommand_spec("activate").map(|spec| spec.name),
             Some("window.activate")
+        );
+
+        assert_eq!(canonical_wire_method_name("save-session"), None);
+        assert_eq!(
+            resolve_cli_subcommand_spec("save-session").map(|spec| spec.name),
+            Some("session.save")
         );
 
         assert_eq!(

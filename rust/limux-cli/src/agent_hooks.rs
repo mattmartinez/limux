@@ -96,6 +96,65 @@ impl AgentHookSessionStore {
         Ok(file.sessions.get(session_id.as_deref().unwrap()).cloned())
     }
 
+    pub(crate) fn session_for_live_pid(
+        &self,
+        pid: u32,
+        workspace_id: &str,
+        surface_id: &str,
+    ) -> Result<Option<String>> {
+        let file = self.load()?;
+        let target_tab = tab_identity(surface_id);
+        let best = file
+            .sessions
+            .values()
+            .filter(|record| {
+                record.pid == Some(pid)
+                    && record.workspace_id == workspace_id
+                    && (record.surface_id == surface_id
+                        || (!target_tab.is_empty()
+                            && tab_identity(&record.surface_id) == target_tab))
+            })
+            .max_by(|a, b| a.updated_at.total_cmp(&b.updated_at));
+        Ok(best.map(|record| record.session_id.clone()))
+    }
+
+    pub(crate) fn upsert_snapshot(
+        &self,
+        mut record: AgentHookSessionRecord,
+    ) -> Result<Vec<String>> {
+        let Some(session_id) = normalized(&record.session_id) else {
+            return Ok(Vec::new());
+        };
+        record.session_id = session_id.clone();
+        let _lock = self.lock()?;
+        let mut file = self.load()?;
+        let mut superseded = Vec::new();
+        let target_tab = tab_identity(&record.surface_id);
+        file.sessions.retain(|key, existing| {
+            let same_surface = existing.workspace_id == record.workspace_id
+                && (existing.surface_id == record.surface_id
+                    || (!target_tab.is_empty()
+                        && tab_identity(&existing.surface_id) == target_tab));
+            if same_surface && key != &session_id {
+                superseded.push(key.clone());
+                false
+            } else {
+                true
+            }
+        });
+        file.ended_sessions.retain(|ended| {
+            ended.session_id != session_id
+                || tab_identity(&ended.surface_id) != tab_identity(&record.surface_id)
+        });
+        prune_ended_sessions(&mut file.ended_sessions, now_seconds(), || {
+            SessionReferences::load(&self.session_dir)
+        });
+        file.version = 1;
+        file.sessions.insert(session_id, record);
+        self.save(&file)?;
+        Ok(superseded)
+    }
+
     pub(crate) fn update(
         &self,
         session_id: &str,
@@ -107,6 +166,7 @@ impl AgentHookSessionStore {
         let _lock = self.lock()?;
         let mut file = self.load()?;
         let record = update(file.sessions.get(&session_id));
+        let ended_before = file.ended_sessions.len();
         file.ended_sessions.retain(|ended| {
             ended.session_id != session_id
                 || tab_identity(&ended.surface_id) != tab_identity(&record.surface_id)
@@ -114,6 +174,16 @@ impl AgentHookSessionStore {
         prune_ended_sessions(&mut file.ended_sessions, now_seconds(), || {
             SessionReferences::load(&self.session_dir)
         });
+        let ended_changed = file.ended_sessions.len() != ended_before;
+        if !ended_changed
+            && file.version == 1
+            && file.sessions.get(&session_id).is_some_and(|existing| {
+                record_unchanged_and_newest(&file.sessions, &session_id, &record)
+                    && !sibling_store_has_newer_surface_session(&self.path, existing)
+            })
+        {
+            return Ok(());
+        }
         file.version = 1;
         file.sessions.insert(session_id, record);
         self.save(&file)
@@ -419,9 +489,31 @@ fn prune_ended_sessions(
     }
 }
 
-fn tab_identity(surface_id: &str) -> &str {
+pub(crate) fn tab_identity(surface_id: &str) -> &str {
     let surface_id = surface_id.trim();
     surface_id.rsplit(':').next().unwrap_or(surface_id)
+}
+
+pub(crate) fn launch_record_from_process(
+    kind: AgentKind,
+    proc_args: Option<&[String]>,
+    proc_cwd: Option<&str>,
+    proc_env: Option<&BTreeMap<String, String>>,
+) -> Option<AgentLaunchCommandRecord> {
+    let args = proc_args
+        .and_then(|raw| normalize_captured_process_args(kind, raw))
+        .unwrap_or_else(|| vec![kind.fallback_executable().to_string()]);
+    let sanitized = sanitize_launch_arguments(kind, &args);
+    let executable = sanitized.first().cloned()?;
+    let environment = proc_env.map(filter_allowed_environment).unwrap_or_default();
+
+    Some(AgentLaunchCommandRecord {
+        executable,
+        arguments: sanitized,
+        cwd: proc_cwd.and_then(normalized),
+        environment,
+        captured_at: Some(now_seconds()),
+    })
 }
 
 pub(crate) fn launch_record_from_context(
@@ -500,6 +592,98 @@ fn safe_store_name(agent: &str) -> String {
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
         .collect::<String>()
+}
+
+fn record_unchanged_and_newest(
+    sessions: &BTreeMap<String, AgentHookSessionRecord>,
+    session_id: &str,
+    next: &AgentHookSessionRecord,
+) -> bool {
+    let Some(existing) = sessions.get(session_id) else {
+        return false;
+    };
+    let same_launch_command = match (&existing.launch_command, &next.launch_command) {
+        (Some(a), Some(b)) => {
+            a.executable == b.executable
+                && a.arguments == b.arguments
+                && a.cwd == b.cwd
+                && a.environment == b.environment
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if existing.session_id != next.session_id
+        || existing.workspace_id != next.workspace_id
+        || existing.surface_id != next.surface_id
+        || existing.cwd != next.cwd
+        || existing.pid != next.pid
+        || !same_launch_command
+    {
+        return false;
+    }
+    let target_tab = tab_identity(&existing.surface_id);
+    !sessions.iter().any(|(other_id, other)| {
+        other_id != session_id
+            && (other.surface_id == existing.surface_id
+                || tab_identity(&other.surface_id) == target_tab)
+            && other.updated_at >= existing.updated_at
+    })
+}
+
+fn sibling_store_has_newer_surface_session(
+    store_path: &Path,
+    existing: &AgentHookSessionRecord,
+) -> bool {
+    let Some(parent) = store_path.parent() else {
+        return false;
+    };
+    if !existing.updated_at.is_finite() {
+        return true;
+    }
+    // Allow 2 seconds of slack for coarse filesystem mtime granularity.
+    let threshold = UNIX_EPOCH + Duration::from_secs_f64((existing.updated_at - 2.0).max(0.0));
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let target_tab = tab_identity(&existing.surface_id);
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let path = entry.path();
+        if path == store_path {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.ends_with("-hook-sessions.json") {
+            continue;
+        }
+        if let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified()) {
+            if mtime < threshold {
+                continue;
+            }
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(_) => return true,
+        };
+        let Ok(sibling) = serde_json::from_str::<AgentHookSessionFile>(&raw) else {
+            return true;
+        };
+        if sibling.sessions.values().any(|other| {
+            (other.surface_id == existing.surface_id
+                || tab_identity(&other.surface_id) == target_tab)
+                && other.updated_at >= existing.updated_at
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalized(value: &str) -> Option<String> {
@@ -1102,5 +1286,138 @@ mod tests {
             command,
             "cd '/tmp/project one' && 'codex' 'resume' '--model' 'gpt-5.5' '--config' 'profile=work' 'sess-123'"
         );
+    }
+
+    #[test]
+    fn update_skips_rewriting_unchanged_newest_record_and_rewrites_when_superseded() {
+        let dir = tempdir().expect("tempdir");
+        let store = AgentHookSessionStore::new_for_dir("claude", dir.path());
+
+        let mut initial = test_record("sess-a");
+        initial.surface_id = "1:tab-shared".to_string();
+        initial.updated_at = 100.0;
+        store
+            .update("sess-a", |_| initial.clone())
+            .expect("initial save");
+        let first_bytes = fs::read(&store.path).expect("read initial state");
+
+        // Same binding with a newer timestamp does not rewrite the file on disk.
+        let mut repeat = initial.clone();
+        repeat.updated_at = 200.0;
+        store.update("sess-a", |_| repeat).expect("noop update");
+        let after_noop = fs::read(&store.path).expect("read after noop");
+        assert_eq!(after_noop, first_bytes);
+
+        // Once another session on the same surface is newer, updating sess-a
+        // again must persist its newer updated_at so restore picks sess-a.
+        let mut competing = test_record("sess-b");
+        competing.surface_id = "1:tab-shared".to_string();
+        competing.updated_at = 150.0;
+        store
+            .update("sess-b", |_| competing)
+            .expect("competing save");
+
+        let mut promoted = initial.clone();
+        promoted.updated_at = 300.0;
+        store
+            .update("sess-a", |_| promoted)
+            .expect("promote sess-a");
+        let persisted = store.lookup("sess-a").expect("lookup").expect("record");
+        assert_eq!(persisted.updated_at, 300.0);
+    }
+
+    #[test]
+    fn update_rewrites_when_sibling_agent_store_has_newer_surface_session() {
+        let dir = tempdir().expect("tempdir");
+        let claude = AgentHookSessionStore::new_for_dir("claude", dir.path());
+        let codex = AgentHookSessionStore::new_for_dir("codex", dir.path());
+
+        let mut initial = test_record("sess-claude");
+        initial.surface_id = "1:tab-shared".to_string();
+        initial.updated_at = 100.0;
+        claude
+            .update("sess-claude", |_| initial.clone())
+            .expect("initial claude save");
+        let after_initial = fs::read(&claude.path).expect("read initial claude state");
+
+        // A sibling agent session on a different surface must not force a rewrite.
+        let mut other_surface = test_record("sess-codex-other");
+        other_surface.surface_id = "1:tab-other".to_string();
+        other_surface.updated_at = 150.0;
+        codex
+            .update("sess-codex-other", |_| other_surface)
+            .expect("save sibling on other surface");
+
+        let mut repeat_other = initial.clone();
+        repeat_other.updated_at = 180.0;
+        claude
+            .update("sess-claude", |_| repeat_other)
+            .expect("noop update with unrelated sibling");
+        assert_eq!(
+            fs::read(&claude.path).expect("read after unrelated sibling"),
+            after_initial
+        );
+
+        // Once a sibling agent writes a newer session on the same surface, the next
+        // claude update must persist its newer updated_at so restore picks claude.
+        let mut competing_sibling = test_record("sess-codex-shared");
+        competing_sibling.surface_id = "1:tab-shared".to_string();
+        competing_sibling.updated_at = 150.0;
+        codex
+            .update("sess-codex-shared", |_| competing_sibling)
+            .expect("save sibling on shared surface");
+
+        let mut promoted = initial.clone();
+        promoted.updated_at = 250.0;
+        claude
+            .update("sess-claude", |_| promoted)
+            .expect("promote claude over sibling");
+        let persisted = claude
+            .lookup("sess-claude")
+            .expect("lookup")
+            .expect("record");
+        assert_eq!(persisted.updated_at, 250.0);
+    }
+
+    #[test]
+    fn upsert_snapshot_supersedes_same_tab_across_panes_and_clears_ended_tombstone() {
+        let dir = tempdir().expect("tempdir");
+        let store = AgentHookSessionStore::new_for_dir("agy", dir.path());
+
+        let mut old = test_record("old-conv");
+        old.workspace_id = "ws-1".to_string();
+        old.surface_id = "1:tab-a".to_string();
+        old.pid = Some(500);
+        store.update("old-conv", |_| old).expect("seed old");
+        store
+            .remove("new-conv", Some("ws-1"), Some("1:tab-a"))
+            .expect("seed ended tombstone");
+
+        // Tab moved from pane 1 to pane 2 while preserving `tab-a`.
+        assert_eq!(
+            store
+                .session_for_live_pid(500, "ws-1", "2:tab-a")
+                .expect("lookup live pid across pane move"),
+            Some("old-conv".to_string())
+        );
+
+        let mut replacement = test_record("  new-conv  ");
+        replacement.workspace_id = "ws-1".to_string();
+        replacement.surface_id = "2:tab-a".to_string();
+        replacement.pid = Some(600);
+        let superseded = store.upsert_snapshot(replacement).expect("upsert snapshot");
+        assert_eq!(superseded, vec!["old-conv".to_string()]);
+
+        assert!(store.lookup("old-conv").expect("lookup old").is_none());
+        let saved = store
+            .lookup("new-conv")
+            .expect("lookup new")
+            .expect("saved record");
+        assert_eq!(saved.session_id, "new-conv");
+        assert_eq!(saved.surface_id, "2:tab-a");
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.path).expect("read store")).expect("json");
+        assert!(raw.get("ended_sessions").is_none());
     }
 }
