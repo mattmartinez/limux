@@ -1555,13 +1555,13 @@ const BASE_CSS: &str = r#"
     box-shadow: none;
 }
 .limux-ws-name {
-    color: alpha(@window_fg_color, 0.92);
-    font-size: 12px;
-    font-weight: 500;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 700;
 }
 .limux-sidebar-list row:selected .limux-ws-name {
-    color: white;
-    font-weight: 500;
+    color: #ffffff;
+    font-weight: 700;
 }
 .limux-ws-star-btn {
     background: transparent;
@@ -1641,7 +1641,7 @@ const BASE_CSS: &str = r#"
 }
 .limux-sidebar-list row:selected .limux-notify-msg,
 .limux-sidebar-list row:selected .limux-notify-msg-unread {
-    color: white;
+    color: #d0d0d0;
 }
 .limux-sidebar-row-unread {
     background-color: transparent;
@@ -1707,11 +1707,11 @@ const BASE_CSS: &str = r#"
     border-color: alpha(@accent_bg_color, 0.9);
 }
 .limux-ws-path {
-    color: alpha(@window_fg_color, 0.55);
+    color: #8a8a8a;
     font-size: 11px;
 }
 .limux-sidebar-list row:selected .limux-ws-path {
-    color: alpha(white, 0.92);
+    color: #d0d0d0;
 }
 .limux-content {
     background-color: @window_bg_color;
@@ -1821,17 +1821,27 @@ window.csd .titlebar,\n\
     background-image: none;\n\
     box-shadow: none;\n\
 }\n\
-.limux-sidebar-list row:selected .limux-ws-name,\n\
+.limux-ws-name,\n\
+.limux-sidebar-list row:selected .limux-ws-name {\n\
+    color: #ffffff;\n\
+    font-size: 13px;\n\
+    font-weight: 700;\n\
+}\n\
+.limux-ws-path,\n\
+.limux-ws-branch,\n\
+.limux-ws-status-row,\n\
+.limux-ws-description,\n\
+.limux-notify-msg {\n\
+    color: #8a8a8a;\n\
+    font-weight: 400;\n\
+}\n\
 .limux-sidebar-list row:selected .limux-ws-path,\n\
 .limux-sidebar-list row:selected .limux-ws-branch,\n\
 .limux-sidebar-list row:selected .limux-ws-status-row,\n\
-.limux-sidebar-list row:selected .limux-ws-description {\n\
-    color: #ffffff;\n\
-}\n\
-.limux-ws-name,\n\
-.limux-sidebar-list row:selected .limux-ws-name {\n\
-    font-size: 12px;\n\
-    font-weight: 500;\n\
+.limux-sidebar-list row:selected .limux-ws-description,\n\
+.limux-sidebar-list row:selected .limux-notify-msg,\n\
+.limux-sidebar-list row:selected .limux-notify-msg-unread {\n\
+    color: #d0d0d0;\n\
 }\n\
 .limux-indicator-pill-active,\n\
 .limux-indicator-pill-active:hover {\n\
@@ -9863,7 +9873,7 @@ mod tests {
     fn dark_chrome_matches_cmux_black_and_selection() {
         assert!(BASE_CSS.contains(crate::workspace_color::SELECTION_FILL));
         assert!(BASE_CSS.contains(
-            ".limux-ws-name {\n    color: alpha(@window_fg_color, 0.92);\n    font-size: 12px;"
+            ".limux-ws-name {\n    color: #ffffff;\n    font-size: 13px;"
         ));
         let chrome = chrome_css();
         assert!(chrome.contains(crate::workspace_color::CHROME_BLACK));

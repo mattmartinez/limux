@@ -418,20 +418,20 @@ fn is_spinner_frame(c: char) -> bool {
     )
 }
 
-/// CSS for the card rows. Secondary lines match the path; selected rows go white
-/// so they stay readable on the blue selection fill.
+/// CSS for the card rows. Title is bold white; the other lines stay grey.
 pub fn card_css() -> &'static str {
     ".limux-ws-description,\n\
      .limux-ws-status-row,\n\
      .limux-ws-branch {\n\
-         font-size: 0.85em;\n\
-         color: alpha(@window_fg_color, 0.55);\n\
+         font-size: 11px;\n\
+         font-weight: 400;\n\
+         color: #8a8a8a;\n\
      }\n\
      .limux-ws-branch { margin-right: 6px; }\n\
      .limux-sidebar-list row:selected .limux-ws-description,\n\
      .limux-sidebar-list row:selected .limux-ws-status-row,\n\
      .limux-sidebar-list row:selected .limux-ws-branch {\n\
-         color: white;\n\
+         color: #d0d0d0;\n\
      }\n"
 }
 
