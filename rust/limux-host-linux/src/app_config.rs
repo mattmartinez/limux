@@ -618,7 +618,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
     let show_workspace_indicators = interface_obj
         .and_then(|interface| interface.get("show_workspace_indicators"))
         .and_then(Value::as_bool)
-        .unwrap_or(true);
+        .unwrap_or_else(|| InterfaceConfig::default().show_workspace_indicators);
 
     let show_tab_activity = interface_obj
         .and_then(|interface| interface.get("show_tab_activity"))
