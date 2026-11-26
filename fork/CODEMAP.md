@@ -23,6 +23,8 @@ Merge, never rebase, so `main` is never rewritten. Land the result as a PR onto
 this fork's `main`, not a force-push, and not a PR to `am-will` unless the
 change is the `card-status` subset (no `fork/`, no Ghostty pin move).
 
+`AGENTS.md` and `CLAUDE.md` open with "This checkout is a fork". A sync that conflicts on either file must put that section back. It is how the next agent finds this map.
+
 ## What the fork is
 
 cmux-style sidebar cards on top of Limux, plus the Ghostty and browser-check
