@@ -222,7 +222,7 @@ impl Default for InterfaceConfig {
         Self {
             window_controls_side: WindowControlsSide::default(),
             show_top_bar: true,
-            show_workspace_indicators: true,
+            show_workspace_indicators: false,
             show_tab_activity: true,
             tab_activity_seconds: DEFAULT_TAB_ACTIVITY_SECONDS,
         }
