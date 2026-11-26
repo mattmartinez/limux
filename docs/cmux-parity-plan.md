@@ -54,7 +54,8 @@ dispatcher parity.
 - `surface.send_text` and `notification.create` now pass `allow_name=true`
   to `parse_optional_workspace_target`, so peers can address each other
   by workspace name (`--workspace claude`) without juggling runtime
-  UUIDs. This is what made phase 5 practical.
+  UUIDs. This is what made phase 5 practical. A name that several
+  workspaces share is an error that lists their ids.
 - `pane.list`, `pane.surfaces`, and `surface.list` now route on the live
   GTK bridge, so agents can discover peer panes/surfaces in a running
   Limux window.
@@ -99,7 +100,8 @@ and `~/.gemini/config/hooks.json` hooks blocks.
 - Writes `AGENTS.md` in the shared cwd documenting:
     - the peers table (agent → workspace name → workspace ID → launch cmd),
     - the `<agent-msg from="…" to="…" id="…" reply-to="…" ts="…">` envelope,
-    - the exact `limux send` invocation for sending and replying,
+    - the exact `limux send` and `limux send-key ... Enter` invocations for
+      sending and replying,
     - the `limux notify` escalation path for human input,
     - the `LIMUX_*` env contract every spawned terminal inherits,
     - editable Policies section (timeouts, size limits, destructive-action gating).

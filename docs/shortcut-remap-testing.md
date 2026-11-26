@@ -36,29 +36,31 @@ leaves `config.json` untouched.
 ## Important Runtime Behavior
 
 - Shortcuts are loaded at startup.
-- When you change them through the terminal `Keybinds` editor, Limux writes the config, reloads it, and applies the new bindings immediately in the running app.
+- When you change one through the `Keybinds` editor, Limux saves that entry, keeps the other entries in the file, and applies the new binding immediately in the running app.
 - If you edit `~/.config/limux/shortcuts.json` by hand outside the app, restart Limux to pick up those changes.
 - If the config file is invalid or unreadable, Limux falls back to defaults and prints a warning to stderr.
-- If two active shortcuts resolve to the same binding, Limux rejects the override set and falls back to defaults.
-- Unknown shortcut IDs are ignored with a warning.
+- If two overrides resolve to the same binding, Limux rejects the override set and falls back to defaults.
+- If an override uses the default binding of another shortcut, the override wins. The other shortcut has no binding, and Limux prints a warning.
+- Unknown shortcut IDs, and entries that Limux cannot read, are ignored with a warning. The other entries still apply.
 - `null` or `""` unbinds a shortcut.
 - Host shortcuts must use `Ctrl`, `Alt`, or `Cmd` as the base modifier unless the shortcut explicitly allows a bare function key, such as the default `F11` fullscreen binding. `Shift` can be added on top of a modified shortcut.
 - Most default shortcuts use `Ctrl`; fullscreen defaults to `F11`.
-- `Cmd` is a logical Limux modifier that matches either Linux `Meta` or Linux `Super` for custom remaps.
+- `Cmd` is a logical Limux modifier that matches either Linux `Meta` or Linux `Super` for custom remaps. `Opt` is another name for `Alt`.
 - App-global shortcuts still fire inside editable widgets, but surface and browser shortcuts bypass editable widgets so native text editing keeps working.
+- A binding names a key of the active keyboard layout, without its Shift or AltGr level. If no binding matches that key, Limux also tries the symbol that the key typed, the digit on the key (for example the top row of a French layout), and, on a layout without Latin letters, the key of another configured layout.
+- While they have their default bindings, `Ctrl+Alt++` and the keypad `+` also increase the terminal font size, and the keypad `-` decreases it.
 
 ## Keybinds Editor
 
-The terminal right-click menu now includes `Keybinds`.
+The terminal right-click menu includes `Keybinds`, which opens the editor in a tab of that pane. `Settings` shows the same editor on its `Keybindings` page.
 
-Selecting it opens a popover editor that:
+The editor:
 
 - lists every host-owned shortcut
 - shows the current binding
 - shows the default binding
 - lets you click a binding pill to enter listening mode
-- closes from the top-right `×` button
-- also closes when you click outside the popover
+- takes the keys you press while it listens, so a shortcut that you press does not run
 
 Capture rules:
 
@@ -152,7 +154,7 @@ These are the current supported config keys and defaults:
 | `terminal_clear_scrollback` | `<Ctrl><Alt>k` |
 | `terminal_copy` | `<Ctrl><Shift>c` |
 | `terminal_paste` | `<Ctrl><Shift>v` |
-| `terminal_increase_font_size` | `<Ctrl><Alt>plus` |
+| `terminal_increase_font_size` | `<Ctrl><Alt>equal` |
 | `terminal_decrease_font_size` | `<Ctrl><Alt>minus` |
 | `terminal_reset_font_size` | `<Ctrl><Alt><Shift>0` |
 
@@ -191,6 +193,9 @@ That means terminal-native combos like these should pass through unless you expl
 - `Ctrl+R`
 - plain typing
 - `Enter`
+- `Ctrl+Enter`
+
+Ghostty consumes the keys of its own keybinds. Limux removes the Ghostty defaults for actions that Limux does not implement, such as `Ctrl+Enter` for fullscreen, so that those keys reach the program in the terminal. A keybind in your Ghostty config still applies.
 
 Editable browser fields should also retain native behavior for:
 
@@ -262,7 +267,7 @@ Launch Limux and verify:
 - `Ctrl+Alt+Shift+D` splits down
 - `Ctrl+W` reaches the focused terminal
 - `Ctrl+Shift+W` closes the focused tab
-- `Ctrl+Alt+W` closes the focused pane
+- `Ctrl+Alt+W` closes the focused pane, but not the only pane of a workspace
 - `Ctrl+Alt+Page_Down` and `Ctrl+Alt+Page_Up` switch workspaces
 - pane button tooltips show the default shortcut suffixes where applicable
 - `Ctrl+Alt+Q` quits Limux
@@ -313,14 +318,14 @@ Create:
 {
   "shortcuts": {
     "new_terminal": "<Ctrl><Alt>y",
-    "close_focused_pane": "<Ctrl><Alt><BackSpace>"
+    "close_focused_pane": "<Ctrl><Alt>BackSpace"
   }
 }
 ```
 
 Restart Limux and verify:
 
-- pane button tooltips show `Ctrl+Alt+Y` and `Ctrl+Alt+BackSpace`
+- pane button tooltips show `Ctrl+Alt+Y` and `Ctrl+Alt+Backspace`
 - `Ctrl+Alt+Y` opens a terminal tab
 - `Ctrl+Alt+T` no longer opens a terminal tab
 - `Ctrl+Alt+BackSpace` closes the focused pane
@@ -351,11 +356,11 @@ Restart Limux from a terminal and verify:
 Launch Limux, right-click inside a terminal, and verify:
 
 - the terminal context menu contains `Keybinds`
-- clicking `Keybinds` opens the keybind editor popover
+- clicking `Keybinds` opens the keybind editor in a tab
 - the editor shows a row for every host-owned shortcut
 - each row shows both the current binding and the default binding
-- clicking the `×` button closes the popover
-- clicking outside the popover also closes it
+- the tab closes like any other tab
+- `Settings` shows the same editor on its `Keybindings` page
 
 ### 7. Remap From The Editor
 
@@ -375,12 +380,13 @@ Launch Limux, open terminal `Keybinds`, and try these invalid captures on any ro
 
 - press only `Shift+H`
 - press only `Ctrl`
-- assign a combo already used by another shortcut
+- assign a combo already used by another shortcut, such as `Ctrl+Alt+N` or `Ctrl+Alt+Q`
 
 Verify:
 
 - the row shows an inline error
 - the previous binding remains visible after the error
+- no new instance opens, and Limux does not quit
 - the running app keeps the old working shortcut
 
 ### 9. Unknown ID Handling
@@ -447,7 +453,8 @@ Launch a browser tab and verify:
 Verify with a terminal tab focused:
 
 - `Ctrl+Alt+F` opens terminal search
-- `Ctrl+Alt+G` and `Ctrl+Alt+Shift+G` move through terminal search results
+- `Ctrl+Alt+G` and `Ctrl+Alt+Shift+G` move through terminal search results, also while the find field has focus
+- `Ctrl+Alt+Shift+F` and `Escape` hide terminal search and return focus to the terminal
 - `Ctrl+Alt+E` uses the current terminal selection for search
 - `Ctrl+Alt+K`, `Ctrl+Shift+C`, `Ctrl+Shift+V`, `Ctrl+Alt++`, `Ctrl+Alt+-`, and `Ctrl+Alt+Shift+0` affect only the terminal
 

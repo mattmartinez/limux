@@ -1368,6 +1368,55 @@ fn localized_split_and_remove_keep_sibling_gl_areas_realized() {
     pump_until(wait, || !window.is_visible());
 }
 
+// Growing a pane into its neighbor's minimum stops there: the first resize
+// back takes effect, and repeating the first one changes nothing.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn pane_resize_stops_at_the_neighbor_minimum() {
+    let (state, _temp) = held_tab_test_window("dev.limux.PaneResizeLimitTest");
+    let (ws_id, root) = show_focused_workspace(
+        &state,
+        LayoutNodeState::Split(SplitState {
+            orientation: SplitOrientation::Horizontal,
+            ratio: 0.5,
+            start: Box::new(LayoutNodeState::Pane(PaneState::fallback(None))),
+            end: Box::new(LayoutNodeState::Pane(PaneState::fallback(None))),
+        }),
+    );
+    let first = find_leaf_pane(&root, gtk::Orientation::Horizontal, true);
+    let container = {
+        let s = state.borrow();
+        let workspace = s.workspaces.iter().find(|w| w.id == ws_id).unwrap();
+        workspace.split_container.clone()
+    };
+    let resize = |units: f64| {
+        let outcome = container
+            .resize_pane(&first, gtk::Orientation::Horizontal, units)
+            .expect("the pane is in the workspace");
+        pump_for(std::time::Duration::from_millis(200));
+        assert_eq!(first.width(), outcome.width);
+        outcome
+    };
+
+    let limit = resize(200.0);
+    assert!(limit.changed);
+    let again = resize(200.0);
+    assert!(!again.changed, "already at the limit");
+    assert_eq!(again.width, limit.width);
+    // 10 px per unit, within a pixel of rounding.
+    let back = resize(-5.0);
+    assert!(back.changed);
+    assert!(
+        (limit.width - 50 - back.width).abs() <= 1,
+        "shrinking by 50 px from {} gave {}",
+        limit.width,
+        back.width
+    );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 fn buttons_labelled(root: &gtk::Widget, label: &str) -> Vec<gtk::Button> {
     widget_tree(root)
         .into_iter()
@@ -1516,6 +1565,35 @@ fn opening_a_held_background_tab_focuses_restart() {
     window.close();
 }
 
+// Choosing Keybinds in a pane that already has the tab shows that tab.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn opening_keybinds_again_shows_the_open_tab() {
+    let (state, _temp) = held_tab_test_window("dev.limux.KeybindsAgainTest");
+    let (_ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let pane = first_leaf_pane(&root);
+    let terminal = pane::active_tab_in_pane(&pane).unwrap();
+    open_keybind_editor_tab(&state, &pane);
+    let keybinds = pane::active_tab_in_pane(&pane).unwrap();
+    assert_ne!(keybinds, terminal);
+    assert!(pane::activate_tab_in_pane(&pane, &terminal));
+
+    open_keybind_editor_tab(&state, &pane);
+    assert_eq!(
+        pane::tab_count_in_pane(&pane),
+        2,
+        "one Keybinds tab per pane"
+    );
+    assert_eq!(
+        pane::active_tab_in_pane(&pane).as_deref(),
+        Some(keybinds.as_str())
+    );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
 fn held_tab_test_window(app_id: &str) -> (State, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     for key in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] {
@@ -1542,6 +1620,23 @@ fn held_tab_test_window(app_id: &str) -> (State, tempfile::TempDir) {
     build_window(&app);
     let state = CONTROL_STATE.with(|slot| slot.borrow().as_ref().unwrap().clone());
     (state, temp)
+}
+
+// Settings is an application window, so it must not outlive the main window.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn closing_the_window_closes_its_settings() {
+    let wait = std::time::Duration::from_secs(10);
+    let (state, _temp) = held_tab_test_window("dev.limux.CloseSettingsTest");
+    let window = state.borrow().window.clone();
+    let app = window.application().unwrap();
+    pump_until(wait, || window.is_mapped());
+    open_settings_dialog(&state);
+    assert_eq!(app.windows().len(), 2);
+
+    window.close();
+    pump_until(wait, || app.windows().is_empty());
+    assert!(app.windows().is_empty(), "a window keeps the app running");
 }
 
 // Returning to a workspace lands in the pane last used there, not its first
@@ -1684,6 +1779,72 @@ fn next_unread_terminal_reaches_a_hidden_tab() {
     window.close();
 }
 
+// The find entry has the focus while the bar is open, so the find shortcuts
+// must work from there. However the bar closes, the keyboard is back at once.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn terminal_find_works_from_its_entry_and_gives_the_focus_back() {
+    let (state, _temp) = held_tab_test_window("dev.limux.TerminalFindTest");
+    let (_, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let window = state.borrow().window.clone();
+    let gl_area = find_gl_area(&root).expect("terminal");
+    let search_bar = widget_tree(gl_area.parent().as_ref().unwrap())
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::SearchBar>().ok())
+        .expect("find bar");
+    let widgets = widget_tree(search_bar.upcast_ref());
+    let entry = widgets
+        .iter()
+        .find_map(|widget| widget.downcast_ref::<gtk::SearchEntry>())
+        .expect("find entry");
+    let close_button = widgets
+        .iter()
+        .filter_map(|widget| widget.downcast_ref::<gtk::Button>())
+        .find(|button| button.has_css_class("close"))
+        .expect("find bar close button");
+    let blocked = |command| {
+        shortcut_blocked_by_editable(
+            command,
+            EditableCapturePolicy::BypassInEditable,
+            focused_editable_capture_context(&state, window.upcast_ref()),
+        )
+    };
+
+    type Close<'a> = &'a dyn Fn();
+    let closings: [(&str, Close); 3] = [
+        ("Escape", &|| entry.emit_by_name::<()>("stop-search", &[])),
+        ("the close button", &|| close_button.emit_clicked()),
+        ("the shortcut", &|| {
+            assert!(dispatch_shortcut_command(
+                &state,
+                ShortcutCommand::SurfaceFindHide
+            ));
+        }),
+    ];
+    for (what, close) in closings {
+        assert!(dispatch_shortcut_command(
+            &state,
+            ShortcutCommand::SurfaceFind
+        ));
+        assert_focus_within(what, &state, entry.upcast_ref());
+        for command in [
+            ShortcutCommand::SurfaceFindNext,
+            ShortcutCommand::SurfaceFindPrevious,
+            ShortcutCommand::SurfaceFindHide,
+        ] {
+            assert!(!blocked(command), "{command:?} in the find entry");
+        }
+        assert!(blocked(ShortcutCommand::TerminalCopy));
+
+        close();
+        assert!(!search_bar.is_search_mode(), "{what} closes the bar");
+        assert!(gl_area.is_focus(), "{what} gives the focus back at once");
+        assert!(!blocked(ShortcutCommand::TerminalCopy));
+    }
+    window.close();
+}
+
 // The next-unread action unzooms another pane to show the unread tab, and
 // that reads it: the action must not keep landing on the same tab.
 #[test]
@@ -1722,6 +1883,157 @@ fn next_unread_terminal_reads_a_tab_a_zoom_hid() {
         !pane::workspace_has_unread_tabs(&ws_id),
         "being taken to the tab reads it"
     );
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+/// Two panes side by side, the second with two terminal tabs, and the focus in
+/// the first.
+fn show_focused_first_of_two_panes(state: &State) -> (gtk::Widget, gtk::Widget) {
+    let (_ws_id, root) = show_focused_workspace(
+        state,
+        LayoutNodeState::Split(SplitState {
+            orientation: SplitOrientation::Horizontal,
+            ratio: 0.5,
+            start: Box::new(LayoutNodeState::Pane(PaneState::fallback(None))),
+            end: Box::new(LayoutNodeState::Pane(PaneState::fallback(None))),
+        }),
+    );
+    let first = find_leaf_pane(&root, gtk::Orientation::Horizontal, true);
+    let second = find_leaf_pane(&root, gtk::Orientation::Horizontal, false);
+    pane::add_terminal_tab_to_pane(&second);
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(pane::focus_active_tab_in_pane(&first));
+    pump_for(std::time::Duration::from_millis(200));
+    assert_focus_within("before", state, &first);
+    (first, second)
+}
+
+// Enter commits a tab rename and gives the keyboard back to the terminal, not
+// to the tab's close button. Focus that moves elsewhere commits it too.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn tab_rename_commit_returns_the_focus_to_its_terminal() {
+    let (state, _temp) = held_tab_test_window("dev.limux.TabRenameFocusTest");
+    let wait = std::time::Duration::from_secs(5);
+    let (first, second) = show_focused_first_of_two_panes(&state);
+    let start_rename = || {
+        let tab = widget_tree(&first)
+            .into_iter()
+            .find(|w| w.has_css_class("limux-tab"))
+            .expect("a tab button");
+        focus_menu_item(&open_context_menu(&tab), "Rename").emit_clicked();
+        pump_until(wait, || pane::find_tab_rename_entry(&first).is_some());
+        let entry = pane::find_tab_rename_entry(&first).expect("rename entry");
+        pump_for(std::time::Duration::from_millis(200));
+        assert_focus_within("rename started", &state, entry.upcast_ref());
+        entry
+    };
+    let tab_id = pane::active_tab_in_pane(&first).unwrap();
+    let title = || pane::tab_title(&first, &tab_id).unwrap();
+
+    let entry = start_rename();
+    entry.set_text("entered");
+    entry.emit_activate();
+    pump_for(std::time::Duration::from_millis(300));
+    let terminal = find_gl_area(&first).expect("terminal").upcast();
+    assert_focus_within("rename committed", &state, &terminal);
+    assert_eq!(title(), "entered");
+
+    let entry = start_rename();
+    entry.set_text("left");
+    assert!(find_gl_area(&second).expect("terminal").grab_focus());
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(pane::find_tab_rename_entry(&first).is_none());
+    assert_eq!(title(), "left");
+    assert_focus_within("rename left", &state, &second);
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// A tab that closes in another pane, or anything that happens in a workspace
+// that is not on screen, leaves the keyboard where the user is typing.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn only_the_pane_in_use_takes_the_keyboard() {
+    let (state, _temp) = held_tab_test_window("dev.limux.KeyboardOwnerTest");
+    let settle = || pump_for(std::time::Duration::from_millis(400));
+    let (first, second) = show_focused_first_of_two_panes(&state);
+    let close_active = |pane: &gtk::Widget| {
+        let active = pane::active_tab_in_pane(pane).unwrap();
+        assert!(pane::close_tab_in_pane(pane, &active));
+        settle();
+    };
+    close_active(&second);
+    assert_eq!(pane::tab_count_in_pane(&second), 1);
+    assert_focus_within("tab closed in the other pane", &state, &first);
+
+    pane::add_terminal_tab_to_pane(&first);
+    settle();
+    close_active(&first);
+    assert_focus_within("tab closed in the focused pane", &state, &first);
+
+    pane::add_terminal_tab_to_pane(&second);
+    settle();
+    let hidden_ws = {
+        let s = state.borrow();
+        s.active_workspace().unwrap().id.clone()
+    };
+    let (_ws_id, root) =
+        show_focused_workspace(&state, LayoutNodeState::Pane(PaneState::fallback(None)));
+    let shown = first_leaf_pane(&root);
+    assert!(!second.is_mapped());
+
+    close_active(&second);
+    assert_focus_within("tab closed in a hidden workspace", &state, &root);
+    pane::add_terminal_tab_to_pane(&second);
+    settle();
+    assert_focus_within("tab created in a hidden workspace", &state, &root);
+    assert!(split_pane(
+        &state,
+        &hidden_ws,
+        &second,
+        gtk::Orientation::Vertical,
+        split_options(),
+    )
+    .is_some());
+    settle();
+    assert_focus_within("split in a hidden workspace", &state, &root);
+
+    // A tab dropped on the sidebar row of a hidden workspace.
+    pane::add_terminal_tab_to_pane(&shown);
+    settle();
+    let moved = pane::active_surface_summary(&shown).unwrap();
+    assert!(handle_tab_drop_to_workspace(
+        &state,
+        &hidden_ws,
+        &moved.surface_id
+    ));
+    settle();
+    assert_eq!(pane::tab_count_in_pane(&shown), 1);
+    assert_focus_within("tab moved to a hidden workspace", &state, &root);
+
+    let window = state.borrow().window.clone();
+    window.close();
+}
+
+// Moving the focus between panes also reaches a pane that shows no terminal.
+#[test]
+#[ignore = "requires a graphical display and Ghostty resources"]
+fn directional_focus_reaches_a_pane_without_a_terminal() {
+    let (state, _temp) = held_tab_test_window("dev.limux.DirectionalFocusTest");
+    let (first, second) = show_focused_first_of_two_panes(&state);
+    open_keybind_editor_tab(&state, &second);
+    pump_for(std::time::Duration::from_millis(300));
+    assert!(pane::focus_active_tab_in_pane(&first));
+    pump_for(std::time::Duration::from_millis(200));
+
+    focus_pane_in_direction(&state, Direction::Right);
+    assert_focus_within("focus right", &state, &second);
+    focus_pane_in_direction(&state, Direction::Left);
+    assert_focus_within("focus left", &state, &first);
 
     let window = state.borrow().window.clone();
     window.close();

@@ -403,6 +403,7 @@ for regression in \
   pane::activity_tests::real_pty_output_drives_tab_activity_lifecycle \
   terminal::ssh_notification_tests::detached_agent_hook_notifies_only_its_originating_terminal \
   terminal::ssh_notification_tests::linked_tmux_sessions_keep_the_originating_notification_client \
+  terminal::tests::terminal_sequences_keep_their_text_and_target \
   ssh_helpers::tests::helper_transfer_configures_only_selected_agent_and_keeps_backup \
   pane::ssh_reconnect_tests::image_paste_follows_moves_and_cancels_on_reconnect \
   pane::ssh_reconnect_tests::local_image_paste_inserts_one_private_path \
@@ -430,17 +431,30 @@ for regression in \
   terminal::tests::context_menu_never_retains_its_terminal \
   terminal::tests::context_menu_the_compositor_refuses_is_detached \
   terminal::tests::detach_after_repaint_waits_for_a_frame_without_the_widget \
+  terminal::tests::keys_without_a_limux_action_reach_the_program \
   window::pane_create_tests::pane_create_replies_once_the_new_pane_can_be_targeted \
   window::pane_create_tests::terminal_commands_retry_until_ready_then_reply_without_a_timer \
+  window::pane_create_tests::input_starts_a_terminal_that_was_never_shown_or_is_rejected \
   window::pane_close_tests::closed_tabs_panes_and_workspaces_free_their_widgets \
+  window::pane_close_tests::opening_keybinds_again_shows_the_open_tab \
   window::pane_close_tests::localized_split_and_remove_keep_sibling_gl_areas_realized \
+  window::pane_close_tests::terminal_find_works_from_its_entry_and_gives_the_focus_back \
   window::pane_close_tests::tab_unread_changes_preserve_independent_workspace_notifications \
   window::pane_close_tests::an_exit_driven_through_the_control_socket_closes_its_tab_unwatched \
   window::pane_close_tests::a_failed_exit_driven_through_the_control_socket_is_held \
   window::pane_close_tests::next_unread_terminal_reads_a_tab_a_zoom_hid \
+  window::pane_close_tests::closing_the_window_closes_its_settings \
   window::pane_close_tests::closing_inactive_workspace_preserves_active_manual_unread \
+  window::pane_close_tests::tab_rename_commit_returns_the_focus_to_its_terminal \
+  window::pane_close_tests::only_the_pane_in_use_takes_the_keyboard \
+  window::pane_close_tests::directional_focus_reaches_a_pane_without_a_terminal \
   window::session_save_tests::close_during_pending_save_persists_the_latest_snapshot \
+  window::session_save_tests::close_completes_with_a_pane_kept_open_without_tabs \
+  window::session_save_tests::close_completes_while_the_session_keeps_changing \
   window::sidebar_group_tests::empty_saved_session_restores_group_headers_and_metadata \
+  window::window_state_tests::hiding_the_sidebar_is_saved_when_it_is_the_first_change \
+  window::window_state_tests::close_focused_pane_keeps_the_only_pane_of_a_workspace \
+  window::window_state_tests::changed_shortcuts_show_in_the_tooltips_of_open_panes \
   window::eager_restore_tests::eager_restore_starts_surviving_tabs_after_an_earlier_workspace_closes \
   window::eager_restore_tests::eager_restore_follows_moved_tabs_and_skips_closed_tabs_after_reordering \
   window::gui_hook_tests::gui_actions_run_their_hooks_and_socket_requests_do_not \
@@ -455,11 +469,13 @@ for regression in \
   split_tree::tests::split_node_swaps_leaf_panes_and_locates_nearest_split_ratio \
   window::tests::swapped_split_node_panes_report_swapped_order_and_indices \
   window::pane_create_tests::pane_swap_and_list_preserve_swapped_leaf_order \
+  window::pane_close_tests::pane_resize_stops_at_the_neighbor_minimum \
   window::ssh_launch_tests::ssh_launch_is_explicit_and_not_persisted \
   window::ssh_launch_tests::persistent_ssh_restores_retries_moves_and_closes \
   window::tab_move_tests::moving_a_first_tab_to_another_workspace_keeps_tab_ids_unique \
   window::tab_move_tests::a_tab_moved_to_another_workspace_answers_to_its_original_ids \
   window::tab_move_tests::an_unscoped_surface_hint_is_resolved_once_across_workspaces \
+  window::tab_move_tests::a_workspace_name_that_several_workspaces_share_is_rejected_with_their_ids \
   window::tab_move_tests::a_surface_hidden_by_a_zoom_is_reported_not_found; do
   timeout -k 5s 30s cargo test --locked $CARGO_FLAGS -p limux-host-linux "$regression" \
     -- --exact --ignored --test-threads=1 --nocapture
@@ -476,10 +492,13 @@ command -v xdotool >/dev/null || {
   exit 2
 }
 for regression in \
+  shortcut_config::tests::default_shortcuts_work_on_other_layouts \
   window::pane_close_tests::inline_rename_commit_returns_the_focus_to_the_workspace \
   window::pane_close_tests::passive_rename_focus_restore_preserves_manual_tab_unread \
   window::pane_close_tests::a_quick_failure_in_a_late_started_terminal_is_held \
+  keybind_editor::tests::recording_takes_the_key_before_the_application_shortcut_runs \
   pane::ssh_reconnect_tests::reconnect_preserves_neighbor_keyboard_focus_and_restores_its_own \
+  window::window_state_tests::focusing_a_split_pane_reads_its_tab \
   window::eager_restore_tests::eager_restore_preserves_live_selection_focus_and_agent_bindings; do
   echo "== regression: $regression under isolated X11 =="
   regression_log="$LOG_DIR/${regression##*::}-x11.txt"

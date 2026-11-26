@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -602,9 +601,6 @@ impl RestorableAgentIndex {
                 if index.session_ended(kind, &session_id, surface_tab_id(&surface_id)) {
                     continue;
                 }
-                let tab_id = surface_id
-                    .rsplit_once(':')
-                    .map(|(_, tab_id)| tab_id.to_string());
                 let key = (workspace_id, surface_id);
                 if index
                     .by_surface
@@ -614,11 +610,11 @@ impl RestorableAgentIndex {
                     continue;
                 }
                 index.by_surface.insert(
-                    key.clone(),
+                    key,
                     (
                         RestorableAgentState {
                             kind,
-                            session_id: session_id.clone(),
+                            session_id,
                             cwd: record.cwd.clone(),
                             launch_command: record.launch_command.clone(),
                             restore_on_startup: true,
@@ -626,45 +622,28 @@ impl RestorableAgentIndex {
                         record.updated_at,
                     ),
                 );
-                match index.by_any_workspace_surface.entry(key.1) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(Some((
-                            RestorableAgentState {
-                                kind,
-                                session_id: session_id.clone(),
-                                cwd: record.cwd.clone(),
-                                launch_command: record.launch_command.clone(),
-                                restore_on_startup: true,
-                            },
-                            record.updated_at,
-                        )));
-                    }
-                    Entry::Occupied(mut entry) => {
-                        entry.insert(None);
-                    }
-                }
-                if let Some(tab_id) = tab_id {
-                    match index.by_tab_id.entry(tab_id) {
-                        Entry::Vacant(entry) => {
-                            entry.insert(Some((
-                                RestorableAgentState {
-                                    kind,
-                                    session_id: session_id.clone(),
-                                    cwd: record.cwd.clone(),
-                                    launch_command: record.launch_command.clone(),
-                                    restore_on_startup: true,
-                                },
-                                record.updated_at,
-                            )));
-                        }
-                        Entry::Occupied(mut entry) => {
-                            entry.insert(None);
-                        }
-                    }
-                }
             }
         }
+        index.index_moved_surfaces();
         index
+    }
+
+    /// Find a moved tab by its surface or tab id alone. Only the newest session
+    /// of each surface counts, so a tab's earlier sessions do not make it
+    /// ambiguous.
+    fn index_moved_surfaces(&mut self) {
+        for ((_, surface_id), newest) in &self.by_surface {
+            self.by_any_workspace_surface
+                .entry(surface_id.clone())
+                .and_modify(|candidate| *candidate = None)
+                .or_insert_with(|| Some(newest.clone()));
+            if let Some((_, tab_id)) = surface_id.rsplit_once(':') {
+                self.by_tab_id
+                    .entry(tab_id.to_string())
+                    .and_modify(|candidate| *candidate = None)
+                    .or_insert_with(|| Some(newest.clone()));
+            }
+        }
     }
 
     pub fn agent_for_surface(
@@ -896,11 +875,12 @@ fn build_resume_command(
     shell_integration: bool,
 ) -> Option<String> {
     let session_id = normalized_str(session_id)?;
-    let run_command =
-        limux_control::agent_sessions::build_resume_command(kind, &session_id, launch, cwd)?;
+    let (cwd, run_command) =
+        limux_control::agent_sessions::build_resume_invocation(kind, &session_id, launch, cwd)?;
     Some(wrap_restored_agent_command(
         kind,
         &session_id,
+        cwd.as_deref(),
         &run_command,
         shell_integration,
     ))
@@ -923,9 +903,13 @@ const BASH_INTEGRATED_LOGIN_SHELL: &str = concat!(
     "ENV=\"$limux_ghostty_bash\" GHOSTTY_BASH_INJECT=1 exec \"$SHELL\" --posix -l; fi; ",
 );
 
+/// Run the agent, forget its session once it ends, and leave a login shell. The
+/// session stays saved when its directory is missing or the agent did not start
+/// (126 and 127), so a later launch can still restore it.
 fn wrap_restored_agent_command(
     kind: RestorableAgentKind,
     session_id: &str,
+    cwd: Option<&str>,
     run_command: &str,
     shell_integration: bool,
 ) -> String {
@@ -944,7 +928,17 @@ fn wrap_restored_agent_command(
     } else {
         ""
     };
-    format!("{run_command}; limux_agent_status=$?; {cleanup}; {integrated}{PLAIN_LOGIN_SHELL}")
+    let run = format!("{run_command}; limux_agent_status=$?");
+    let run = match cwd {
+        Some(cwd) => format!(
+            "if cd {}; then {run}; else limux_agent_status=127; fi",
+            limux_control::agent_sessions::shell_single_quote(cwd)
+        ),
+        None => run,
+    };
+    format!(
+        "{run}; case $limux_agent_status in 126|127) ;; *) {cleanup} ;; esac; {integrated}{PLAIN_LOGIN_SHELL}"
+    )
 }
 
 fn limux_cli_executable() -> String {
@@ -1521,7 +1515,8 @@ mod tests {
                 assert_eq!(agent.kind, RestorableAgentKind::Codex);
                 assert_eq!(agent.session_id, "session-a");
                 let command = agent.resume_command(true).expect("resume command");
-                assert!(command.contains("cd '/tmp/project' && 'codex' 'resume' 'session-a'"));
+                assert!(command.contains("cd '/tmp/project'; then 'codex' 'resume' 'session-a'"));
+                assert!(command.contains("GHOSTTY_BASH_INJECT=1"));
                 assert!(command.contains("hooks codex cleanup"));
             }
             other => panic!("expected terminal tab, got {other:?}"),
@@ -1710,6 +1705,43 @@ mod tests {
             .agent_for_surface("workspace-a", Some(42), "terminal-0")
             .expect("exact surface match");
         assert_eq!(exact_agent.session_id, "session-a");
+    }
+
+    #[test]
+    fn hook_index_uses_the_newest_session_of_a_moved_tab() {
+        let dir = tempdir().expect("tempdir");
+        let record = |session_id: &str, updated_at: f64| {
+            serde_json::json!({
+                "session_id": session_id,
+                "workspace_id": "workspace-a",
+                "surface_id": "42:tab-a",
+                "updated_at": updated_at
+            })
+        };
+        fs::write(
+            dir.path().join("codex-hook-sessions.json"),
+            serde_json::json!({
+                "version": 1,
+                "sessions": {
+                    "a-earlier": record("a-earlier", 10.0),
+                    "b-newest": record("b-newest", 11.0)
+                }
+            })
+            .to_string(),
+        )
+        .expect("write hook state");
+        let index = RestorableAgentIndex::load_from_dir(dir.path());
+
+        for (workspace_id, pane_id) in [
+            ("workspace-a", Some(42)),
+            ("workspace-a", Some(7)),
+            ("workspace-b", Some(42)),
+        ] {
+            let agent = index
+                .agent_for_surface(workspace_id, pane_id, "tab-a")
+                .expect("agent of the moved tab");
+            assert_eq!(agent.session_id, "b-newest");
+        }
     }
 
     #[test]
@@ -1963,9 +1995,39 @@ mod tests {
         };
 
         let command = agent.resume_command(true).expect("resume command");
-        assert!(command.contains("cd '/tmp/project' && 'codex' 'resume' 'sess-123'"));
+        assert!(command.contains("cd '/tmp/project'; then 'codex' 'resume' 'sess-123'"));
         assert!(command.contains("hooks codex cleanup"));
         assert!(command.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+    }
+
+    #[test]
+    fn restored_agent_forgets_its_session_only_after_it_ran() {
+        let dir = tempdir().expect("tempdir");
+        let forgotten = dir.path().join("forgotten");
+        let cli = dir.path().join("cli");
+        fs::write(&cli, format!("#!/bin/sh\n: > '{}'\n", forgotten.display())).expect("stub cli");
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).expect("stub mode");
+        let missing = dir.path().join("missing").to_string_lossy().into_owned();
+        let present = dir.path().to_string_lossy().into_owned();
+
+        for (cwd, agent, forgets) in [
+            (Some(missing.as_str()), "true", false),
+            (Some(present.as_str()), missing.as_str(), false),
+            (None, missing.as_str(), false),
+            (Some(present.as_str()), "true", true),
+            (None, "false", true),
+        ] {
+            let command =
+                wrap_restored_agent_command(RestorableAgentKind::Codex, "sess", cwd, agent, false)
+                    .replace(&limux_cli_executable(), &cli.to_string_lossy());
+            let status = std::process::Command::new("/bin/sh")
+                .args(["-c", &command])
+                .env("SHELL", "true")
+                .status()
+                .expect("run restored agent");
+            assert!(status.success(), "{command}");
+            assert_eq!(forgotten.exists(), forgets, "{command}");
+        }
     }
 
     #[test]
@@ -1983,9 +2045,10 @@ mod tests {
 
     #[test]
     fn restored_agent_command_ends_in_the_login_shell_tail() {
-        let with = wrap_restored_agent_command(RestorableAgentKind::Codex, "s", "true", true);
+        let with = wrap_restored_agent_command(RestorableAgentKind::Codex, "s", None, "true", true);
         assert!(with.ends_with(&format!("{BASH_INTEGRATED_LOGIN_SHELL}{PLAIN_LOGIN_SHELL}")));
-        let without = wrap_restored_agent_command(RestorableAgentKind::Codex, "s", "true", false);
+        let without =
+            wrap_restored_agent_command(RestorableAgentKind::Codex, "s", None, "true", false);
         assert!(without.ends_with(&format!("; {PLAIN_LOGIN_SHELL}")));
         assert!(!without.contains("ghostty.bash"));
     }
@@ -2293,7 +2356,7 @@ mod tests {
 
         let command = agent.resume_command(true).expect("resume command");
         assert!(command.contains(
-            "cd '/tmp/project' && 'env' 'GEMINI_CLI_HOME=/tmp/gemini-home' 'gemini' '--resume' 'gem-sess-1' '--sandbox' '--config-dir' '/tmp/gemini-work' '--yolo' '--model' 'gemini-2.5-pro'"
+            "cd '/tmp/project'; then 'env' 'GEMINI_CLI_HOME=/tmp/gemini-home' 'gemini' '--resume' 'gem-sess-1' '--sandbox' '--config-dir' '/tmp/gemini-work' '--yolo' '--model' 'gemini-2.5-pro'"
         ));
         assert!(!command.contains("GEMINI_CONFIG_DIR"));
         assert!(command.contains("hooks gemini cleanup"));
@@ -2334,7 +2397,7 @@ mod tests {
         assert_eq!(agent.kind, RestorableAgentKind::Agy);
         let command = agent.resume_command(true).expect("agy resume command");
         assert!(command.contains(
-            "cd '/tmp/agy-repo' && 'agy' '--conversation' 'conv-99' '--sandbox' '--model' 'gemini-2.5-pro'"
+            "cd '/tmp/agy-repo'; then 'agy' '--conversation' 'conv-99' '--sandbox' '--model' 'gemini-2.5-pro'"
         ));
         assert!(!command.contains("AGY_CONFIG_DIR"));
         assert!(command.contains("hooks agy cleanup"));

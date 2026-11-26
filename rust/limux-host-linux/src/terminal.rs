@@ -405,6 +405,16 @@ impl TerminalHandle {
             .realize(&self.gl_area, &self.shutting_down);
     }
 
+    /// Start the terminal unless it already runs. A terminal in a workspace or
+    /// tab that was never shown has no process yet. False while a split or a
+    /// tab move keeps it out of the window.
+    pub(crate) fn ensure_started(&self) -> bool {
+        if self.surface_cell.borrow().is_none() {
+            self.realize_in_background();
+        }
+        self.surface_cell.borrow().is_some()
+    }
+
     /// Note input sent through the control socket.
     pub fn note_driven_input(&self) {
         self.driven_at.set(Some(std::time::Instant::now()));
@@ -755,10 +765,12 @@ impl TerminalHandle {
         if !self.search_bar.is_search_mode() {
             return false;
         }
-        self.perform_binding_action("end_search");
         self.search_bar.set_search_mode(false);
-        self.gl_area.grab_focus();
         true
+    }
+
+    pub fn is_find_active(&self) -> bool {
+        self.search_bar.is_search_mode()
     }
 
     pub fn use_selection_for_find(&self) -> bool {
@@ -967,6 +979,7 @@ fn load_ghostty_config_with_font(
 
     unsafe {
         let config = ghostty_config_new();
+        unbind_unsupported_default_keybinds(config);
         ghostty_config_load_default_files(config);
         ghostty_config_load_recursive_files(config);
         let base_contents = serialized_config(config);
@@ -1020,6 +1033,44 @@ fn load_ghostty_config_with_font(
             Ordering::Relaxed,
         );
         config
+    }
+}
+
+/// Default Ghostty keybinds for actions that `ghostty_action_cb` does not
+/// implement. Defaults marked `performable` are not here: Ghostty already
+/// passes those keys on when the action does nothing.
+const UNSUPPORTED_DEFAULT_KEYBINDS: [&str; 14] = [
+    "ctrl+,",           // open_config
+    "ctrl+tab",         // next_tab
+    "ctrl+shift+tab",   // previous_tab
+    "ctrl+shift+n",     // new_window
+    "ctrl+shift+w",     // close_tab
+    "ctrl+shift+q",     // quit
+    "alt+f4",           // close_window
+    "ctrl+shift+t",     // new_tab
+    "ctrl+shift+o",     // new_split:right
+    "ctrl+shift+e",     // new_split:down
+    "ctrl+shift+i",     // inspector:toggle
+    "ctrl+enter",       // toggle_fullscreen
+    "ctrl+shift+enter", // toggle_split_zoom
+    "ctrl+shift+p",     // toggle_command_palette
+];
+
+/// Let these keys reach the program in the terminal. Ghostty consumes a bound
+/// key even when the host does not perform its action. Load this before the
+/// user's files, so that their keybinds win.
+fn unbind_unsupported_default_keybinds(config: ghostty_config_t) {
+    let contents: String = UNSUPPORTED_DEFAULT_KEYBINDS
+        .iter()
+        .map(|trigger| format!("keybind = {trigger}=unbind\n"))
+        .collect();
+    unsafe {
+        ghostty_config_load_string(
+            config,
+            contents.as_ptr().cast::<c_char>(),
+            contents.len(),
+            c"/limux/default-keybinds.ghostty".as_ptr(),
+        );
     }
 }
 
@@ -1752,18 +1803,12 @@ unsafe extern "C" fn ghostty_action_cb(
                 let title = if title_ptr.is_null() {
                     String::new()
                 } else {
-                    unsafe { std::ffi::CStr::from_ptr(title_ptr) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string()
+                    notification_text(unsafe { std::ffi::CStr::from_ptr(title_ptr) }.to_bytes())
                 };
                 let body = if body_ptr.is_null() {
                     String::new()
                 } else {
-                    unsafe { std::ffi::CStr::from_ptr(body_ptr) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string()
+                    notification_text(unsafe { std::ffi::CStr::from_ptr(body_ptr) }.to_bytes())
                 };
                 SURFACE_MAP.with(|map| {
                     if let Some(entry) = map.borrow().get(&surface_key) {
@@ -1780,17 +1825,16 @@ unsafe extern "C" fn ghostty_action_cb(
                 let surface_key = unsafe { target.target.surface } as usize;
                 let pwd_ptr = unsafe { action.action.pwd.pwd };
                 if !pwd_ptr.is_null() {
-                    let pwd = unsafe { std::ffi::CStr::from_ptr(pwd_ptr) }
-                        .to_str()
-                        .unwrap_or("")
-                        .to_string();
-                    SURFACE_MAP.with(|map| {
-                        if let Some(entry) = map.borrow().get(&surface_key) {
-                            if let Some(cb) = &entry.on_pwd_changed {
-                                cb(&pwd);
+                    let pwd = unsafe { std::ffi::CStr::from_ptr(pwd_ptr) };
+                    if let Some(pwd) = reported_pwd(pwd.to_bytes()) {
+                        SURFACE_MAP.with(|map| {
+                            if let Some(entry) = map.borrow().get(&surface_key) {
+                                if let Some(cb) = &entry.on_pwd_changed {
+                                    cb(pwd);
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             }
             true
@@ -1965,6 +2009,24 @@ unsafe extern "C" fn ghostty_action_cb(
     }
 }
 
+/// Ghostty cuts notification fields at a byte count, which can split the last
+/// character. Drop that partial character, not the whole field.
+fn notification_text(bytes: &[u8]) -> String {
+    let complete = match std::str::from_utf8(bytes) {
+        Err(error) if error.error_len().is_none() => &bytes[..error.valid_up_to()],
+        _ => bytes,
+    };
+    String::from_utf8_lossy(complete).into_owned()
+}
+
+/// Ghostty reports an empty path when a program resets the directory. Limux
+/// keeps the last known directory then, and for a path it cannot save.
+fn reported_pwd(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .filter(|pwd| !pwd.is_empty())
+}
+
 fn ghostty_open_url_to_string(open_url: ghostty_action_open_url_s) -> Option<String> {
     if open_url.url.is_null() || open_url.len == 0 {
         return None;
@@ -2010,7 +2072,10 @@ fn clipboard_completion_text_ptr(text: *const c_char) -> *const c_char {
 }
 
 fn clipboard_from_type(display: &gtk::gdk::Display, clipboard_type: c_int) -> gtk::gdk::Clipboard {
-    if clipboard_type == GHOSTTY_CLIPBOARD_SELECTION {
+    if matches!(
+        clipboard_type,
+        GHOSTTY_CLIPBOARD_SELECTION | GHOSTTY_CLIPBOARD_PRIMARY
+    ) {
         display.primary_clipboard()
     } else {
         display.clipboard()
@@ -2059,6 +2124,13 @@ fn clipboard_write_policy(
             write_clipboard: copy_selection_to_clipboard,
             write_primary: true,
             show_toast: copy_selection_to_clipboard,
+        }
+    } else if clipboard_type == GHOSTTY_CLIPBOARD_PRIMARY {
+        // A program asked for the primary selection alone.
+        ClipboardWritePolicy {
+            write_clipboard: false,
+            write_primary: true,
+            show_toast: false,
         }
     } else {
         ClipboardWritePolicy {
@@ -2602,22 +2674,20 @@ pub fn create_terminal(
     }
     {
         let surface_cell = surface_cell.clone();
-        let search_bar = search_bar.downgrade();
         let gl_area = gl_area.downgrade();
-        let handler = search_entry.connect_stop_search(move |_| {
-            let Some(search_bar) = search_bar.upgrade() else {
-                return;
-            };
-            if !search_bar.is_search_mode() {
+        // GTK itself hides the bar on Escape and on its close button. The hidden
+        // entry keeps the focus, and takes what is typed, until its animation
+        // ends, so give the focus back as soon as the mode changes.
+        let handler = search_bar.connect_search_mode_enabled_notify(move |search_bar| {
+            if search_bar.is_search_mode() {
                 return;
             }
             surface_action(*surface_cell.borrow(), "end_search");
-            search_bar.set_search_mode(false);
             if let Some(gl_area) = gl_area.upgrade() {
                 gl_area.grab_focus();
             }
         });
-        track_signal(&signal_handlers, &search_entry, handler);
+        track_signal(&signal_handlers, &search_bar, handler);
     }
     {
         let surface_cell = surface_cell.clone();
@@ -3853,6 +3923,101 @@ mod tests {
 
     #[test]
     #[ignore = "requires a graphical display and Ghostty resources"]
+    fn terminal_sequences_keep_their_text_and_target() {
+        crate::prepare_ghostty_runtime();
+        gtk::init().expect("GTK display required");
+        init_ghostty();
+
+        let notifications = Rc::new(RefCell::new(Vec::new()));
+        let directories = Rc::new(RefCell::new(Vec::new()));
+        let mut callbacks = TerminalCallbacks::disconnected();
+        callbacks.copy_selection_to_clipboard = Box::new(|| true);
+        callbacks.on_desktop_notification = Box::new({
+            let notifications = notifications.clone();
+            move |title, body, _| {
+                notifications
+                    .borrow_mut()
+                    .push((title.to_string(), body.to_string()))
+            }
+        });
+        callbacks.on_pwd_changed = Box::new({
+            let directories = directories.clone();
+            move |pwd| directories.borrow_mut().push(pwd.to_string())
+        });
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("sequences.sh");
+        let (primary, standard) = (temp.path().join("primary"), temp.path().join("standard"));
+        let body = "x".to_string() + &"完了".repeat(50);
+        std::fs::write(
+            &script,
+            format!(
+                "printf '\\033]777;notify;done;{body}\\007'\n\
+                 for path in /tmp /tmp/%ff; do printf '\\033]7;file://localhost%s\\007' $path; done\n\
+                 printf '\\033]7;\\007'\n\
+                 while ! [ -e '{}' ]; do sleep 0.05; done\n\
+                 printf '\\033]52;p;cHJpbWFyeQ==\\007'\n\
+                 while ! [ -e '{}' ]; do sleep 0.05; done\n\
+                 printf '\\033]52;c;Y2Fm6Q==\\007'\n\
+                 sleep 30\n",
+                primary.display(),
+                standard.display()
+            ),
+        )
+        .unwrap();
+        let terminal = create_terminal(
+            Some("/tmp"),
+            TerminalOptions {
+                startup_command: Some(format!("/bin/sh {}", script.display())),
+                ..TerminalOptions::default()
+            },
+            callbacks,
+        );
+        let window = gtk::Window::builder().child(&terminal.root).build();
+        window.present();
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let display = gtk::gdk::Display::default().unwrap();
+        let text = |clipboard: gtk::gdk::Clipboard| {
+            let value = clipboard
+                .content()
+                .and_then(|content| content.value(String::static_type()).ok());
+            value.and_then(|value| value.get::<String>().ok())
+        };
+        display.clipboard().set_text("mine");
+
+        wait_for("the notification", &|| !notifications.borrow().is_empty());
+        assert_eq!(
+            *notifications.borrow(),
+            [("done".to_string(), body[..253].to_string())]
+        );
+
+        std::fs::write(primary, "").unwrap();
+        wait_for("the primary selection", &|| {
+            text(display.primary_clipboard()).as_deref() == Some("primary")
+        });
+        assert_eq!(text(display.clipboard()).as_deref(), Some("mine"));
+        // The directory reports came before this write.
+        assert_eq!(*directories.borrow(), ["/tmp"]);
+
+        std::fs::write(standard, "").unwrap();
+        wait_for("the clipboard", &|| {
+            text(display.clipboard()).as_deref() != Some("mine")
+        });
+        assert_eq!(text(display.clipboard()).as_deref(), Some("caf\u{fffd}"));
+
+        terminal.handle.shutdown();
+        window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display and Ghostty resources"]
     fn shutdown_with_pending_terminal_messages() {
         crate::prepare_ghostty_runtime();
         gtk::init().expect("GTK display required");
@@ -4166,36 +4331,153 @@ mod tests {
     }
 
     #[test]
-    fn key_translation_honors_caps_lock_escape_remaps() {
-        let modifiers = gtk::gdk::ModifierType::empty();
-        let caps_as_escape = translate_key_event(
-            GHOSTTY_ACTION_PRESS,
-            None,
-            None,
-            gtk::gdk::Key::Escape,
-            66,
-            modifiers,
-        );
-        let escape_as_caps = translate_key_event(
-            GHOSTTY_ACTION_PRESS,
-            None,
-            None,
-            gtk::gdk::Key::Caps_Lock,
-            9,
-            modifiers,
-        );
-        let writing_key = translate_key_event(
-            GHOSTTY_ACTION_PRESS,
-            None,
-            None,
-            gtk::gdk::Key::a,
-            38,
-            modifiers,
-        );
+    fn key_translation_honors_layout_remaps() {
+        // Caps Lock and letter keycodes with the keyvals that layouts such as
+        // Colemak (Caps Lock as BackSpace) and Neo (arrow layer) give them.
+        for (keyval, physical, key) in [
+            (gtk::gdk::Key::Escape, 66, GHOSTTY_KEY_ESCAPE),
+            (gtk::gdk::Key::Caps_Lock, 9, GHOSTTY_KEY_CAPS_LOCK),
+            (gtk::gdk::Key::BackSpace, 66, GHOSTTY_KEY_BACKSPACE),
+            (gtk::gdk::Key::Control_L, 66, GHOSTTY_KEY_CONTROL_LEFT),
+            (gtk::gdk::Key::Left, 39, GHOSTTY_KEY_ARROW_LEFT),
+            (gtk::gdk::Key::a, 38, GHOSTTY_KEY_UNIDENTIFIED),
+        ] {
+            let event = translate_key_event(
+                GHOSTTY_ACTION_PRESS,
+                None,
+                None,
+                keyval,
+                physical,
+                gtk::gdk::ModifierType::empty(),
+            );
+            assert_eq!(event.resolved_key, key, "{keyval:?}");
+        }
+    }
 
-        assert_eq!(caps_as_escape.input.keycode, 9);
-        assert_eq!(escape_as_caps.input.keycode, 66);
-        assert_eq!(writing_key.input.keycode, 38);
+    #[test]
+    fn modifier_keys_report_the_state_after_their_own_event() {
+        use gtk::gdk::{Key, ModifierType};
+
+        for (keyval, mask, bit) in [
+            (Key::Shift_L, ModifierType::SHIFT_MASK, GHOSTTY_MODS_SHIFT),
+            (
+                Key::Control_R,
+                ModifierType::CONTROL_MASK,
+                GHOSTTY_MODS_CTRL,
+            ),
+            (Key::Alt_L, ModifierType::ALT_MASK, GHOSTTY_MODS_ALT),
+            (Key::Super_L, ModifierType::SUPER_MASK, GHOSTTY_MODS_SUPER),
+        ] {
+            let mods = |action, modifier| {
+                translate_key_event(action, None, None, keyval, 0, modifier)
+                    .input
+                    .mods
+            };
+            assert_eq!(mods(GHOSTTY_ACTION_PRESS, ModifierType::empty()), bit);
+            assert_eq!(mods(GHOSTTY_ACTION_RELEASE, mask), GHOSTTY_MODS_NONE);
+        }
+        // Another held modifier stays in the state.
+        let press = translate_key_event(
+            GHOSTTY_ACTION_PRESS,
+            None,
+            None,
+            Key::Control_L,
+            37,
+            ModifierType::SHIFT_MASK,
+        );
+        assert_eq!(press.input.mods, GHOSTTY_MODS_SHIFT | GHOSTTY_MODS_CTRL);
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display and Ghostty resources"]
+    fn keys_without_a_limux_action_reach_the_program() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("ghostty");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config"),
+            "keybind = ctrl+shift+p=text:user-keybind\n",
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+        crate::prepare_ghostty_runtime();
+        gtk::init().expect("GTK display required");
+        init_ghostty();
+
+        let terminal = create_terminal(
+            Some("/tmp"),
+            TerminalOptions {
+                startup_command: Some(
+                    "/bin/sh -c 'stty raw -echo; printf READY; exec cat -v'".to_string(),
+                ),
+                ..TerminalOptions::default()
+            },
+            TerminalCallbacks::disconnected(),
+        );
+        let window = gtk::Window::builder()
+            .default_width(800)
+            .default_height(400)
+            .child(&terminal.root)
+            .build();
+        window.present();
+        let handle = &terminal.handle;
+        let screen = || {
+            handle
+                .read_viewport_text()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let wait_for = |expected: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while screen() != expected {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "expected {expected:?}, the program received {:?}",
+                    screen()
+                );
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for("READY");
+
+        // Caps Lock remapped to BackSpace.
+        let surface = handle.surface_cell.borrow().unwrap();
+        let press = |keyval, keycode| {
+            let event = translate_key_event(
+                GHOSTTY_ACTION_PRESS,
+                None,
+                None,
+                keyval,
+                keycode,
+                gtk::gdk::ModifierType::empty(),
+            );
+            unsafe { ghostty_surface_key_with_key(surface, event.input, event.resolved_key) };
+        };
+        press(gtk::gdk::Key::BackSpace, 66);
+        wait_for("READY^?");
+        press(gtk::gdk::Key::Escape, 66);
+        wait_for("READY^?^[");
+        // A modifier or Caps Lock on its own sends nothing.
+        press(gtk::gdk::Key::Caps_Lock, 9);
+        for keyval in [
+            gtk::gdk::Key::Alt_L,
+            gtk::gdk::Key::Control_L,
+            gtk::gdk::Key::Shift_L,
+            gtk::gdk::Key::Super_L,
+        ] {
+            press(keyval, 0);
+        }
+        // Ghostty binds this one by default, to an action Limux does not have.
+        assert!(handle.send_key("<Ctrl>Return"));
+        wait_for("READY^?^[^[[27;5;13~");
+        // The user's keybind for another such default still applies.
+        assert!(handle.send_key("<Ctrl><Shift>p"));
+        wait_for("READY^?^[^[[27;5;13~user-keybind");
+
+        handle.shutdown();
+        window.close();
     }
 
     #[test]
@@ -4250,7 +4532,7 @@ mod tests {
             modifiers,
         );
         assert_eq!(regular_end.input.keycode, 115);
-        assert_eq!(regular_end.resolved_key, GHOSTTY_KEY_UNIDENTIFIED);
+        assert_eq!(regular_end.resolved_key, GHOSTTY_KEY_END);
     }
 
     #[test]
@@ -4554,7 +4836,7 @@ mod tests {
     fn shell_escape_quotes_paths_with_spaces() {
         assert_eq!(
             shell_escape_bytes(b"/home/user/my file.txt"),
-            b"$'/home/user/my file.txt'"
+            b"'/home/user/my file.txt'"
         );
     }
 
@@ -4562,7 +4844,7 @@ mod tests {
     fn shell_escape_handles_single_quotes() {
         assert_eq!(
             shell_escape_bytes(b"/tmp/it's a file"),
-            b"$'/tmp/it\\'s a file'"
+            b"'/tmp/it'\\''s a file'"
         );
     }
 
@@ -4648,6 +4930,37 @@ mod tests {
                 show_toast: true,
             }
         );
+        for copy_selection in [false, true] {
+            assert_eq!(
+                clipboard_write_policy(GHOSTTY_CLIPBOARD_PRIMARY, copy_selection),
+                ClipboardWritePolicy {
+                    write_clipboard: false,
+                    write_primary: true,
+                    show_toast: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn notification_text_drops_only_a_split_last_character() {
+        let text = "x".to_string() + &"完了".repeat(50);
+        // 255 bytes is the limit of a notification body in Ghostty.
+        assert!(std::str::from_utf8(&text.as_bytes()[..255]).is_err());
+        assert_eq!(notification_text(&text.as_bytes()[..255]), &text[..253]);
+        assert_eq!(notification_text("完了".as_bytes()), "完了");
+        assert_eq!(notification_text(b"caf\xe9 done"), "caf\u{fffd} done");
+        assert_eq!(notification_text(b""), "");
+    }
+
+    #[test]
+    fn pwd_reports_without_a_usable_path_are_ignored() {
+        assert_eq!(
+            reported_pwd("/home/ユーザー".as_bytes()),
+            Some("/home/ユーザー")
+        );
+        assert_eq!(reported_pwd(b""), None);
+        assert_eq!(reported_pwd(b"/tmp/\xff"), None);
     }
 
     #[test]
@@ -4663,7 +4976,28 @@ mod tests {
 
         assert_eq!(
             text.as_bytes(),
-            b"/tmp/plain $'/tmp/space name' $'/tmp/it\\'s' $'/tmp/\\xFF\\xFE' $'/tmp/line\\nbreak'"
+            b"/tmp/plain '/tmp/space name' '/tmp/it'\\''s' $'/tmp/\\xFF\\xFE' $'/tmp/line\\nbreak'"
+        );
+    }
+
+    #[test]
+    fn dropped_paths_are_one_argument_each_in_a_posix_shell() {
+        let paths = [
+            "/tmp/plain",
+            "/tmp/space name",
+            "/tmp/it's",
+            "/tmp/$HOME `id` !! * \"q\" \\ ~",
+            "/tmp/完了 é",
+        ];
+        let text = shell_escape_joined_bytes(paths).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\0' {}", text.to_str().unwrap()))
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            paths.map(|path| format!("{path}\0")).concat()
         );
     }
 
