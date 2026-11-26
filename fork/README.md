@@ -27,6 +27,9 @@ When upstream moves its Ghostty pin, the merge stops on the `ghostty` pointer. R
 commits onto upstream's new pin inside `ghostty/`, rebuild with `scripts/build-ghostty.sh`,
 push the branch to `mattmartinez`, then commit the new pointer and finish the merge.
 
+The file list, the UI contract, and what to keep when a merge conflicts are in
+[CODEMAP.md](CODEMAP.md).
+
 ## Keeping up with upstream
 
 ```bash
