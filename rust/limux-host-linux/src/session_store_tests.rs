@@ -32,7 +32,7 @@ fn initial(directory: &Path) -> AppSessionState {
     state
 }
 fn saved(store: &mut SessionStore, state: &AppSessionState) {
-    assert!(matches!(store.save(state).unwrap(), SaveOutcome::Saved));
+    assert!(matches!(store.save(state).unwrap(), SaveOutcome::Saved(_)));
 }
 fn disk(directory: &Path) -> AppSessionState {
     read_session(directory).unwrap().state
@@ -60,12 +60,20 @@ fn background_save_keeps_the_main_context_responsive_and_preserves_merge_ancestr
                 layout_state::save_session_atomic_in(dir.path(), &remote).unwrap();
                 drop(lock);
                 let (store, snapshot, result) = task.await.unwrap();
-                assert!(matches!(result.unwrap(), SaveOutcome::Saved));
+                let SaveOutcome::Saved(summary) = result.unwrap() else {
+                    panic!("expected saved session outcome");
+                };
                 assert_eq!(snapshot, local);
+                assert_eq!(summary.workspaces, 2);
+                assert_eq!(summary.tabs, 2);
+                assert_eq!(
+                    summary.path,
+                    layout_state::canonical_session_path_in(dir.path())
+                );
 
                 local.workspaces[0].name = "latest local edit".into();
                 let (_, snapshot, result) = store.save_in_background(local.clone()).await.unwrap();
-                assert!(matches!(result.unwrap(), SaveOutcome::Saved));
+                assert!(matches!(result.unwrap(), SaveOutcome::Saved(_)));
                 assert_eq!(snapshot, local);
                 let saved = disk(dir.path());
                 assert_eq!(saved.workspaces[0].name, "latest local edit");
@@ -125,7 +133,7 @@ fn background_save_returns_errors_without_losing_the_store_or_unsaved_changes() 
                 assert_eq!(fs::read_to_string(&path).unwrap(), "invalid session");
                 layout_state::save_session_atomic_in(dir.path(), &base).unwrap();
                 let (_, _, result) = store.save_in_background(local.clone()).await.unwrap();
-                assert!(matches!(result.unwrap(), SaveOutcome::Saved));
+                assert!(matches!(result.unwrap(), SaveOutcome::Saved(_)));
                 assert_eq!(disk(dir.path()), local);
             });
         })
@@ -187,7 +195,7 @@ fn measure_session_save_lock_contention() {
                         if background {
                             let (_, _, result) =
                                 store.save_in_background(state.clone()).await.unwrap();
-                            assert!(matches!(result.unwrap(), SaveOutcome::Saved));
+                            assert!(matches!(result.unwrap(), SaveOutcome::Saved(_)));
                         } else {
                             saved(&mut store, &state);
                         }
@@ -967,4 +975,123 @@ fn noop_repeat_save_does_not_rewrite_unchanged_canonical_file() {
         ino_after_first, ino_after_noop,
         "repeated no-op save must not replace canonical session.json inode"
     );
+}
+
+#[test]
+fn clean_canonical_read_reports_no_minted_ids_while_empty_pane_does() {
+    let dir = tempdir().unwrap();
+    let _base = initial(dir.path());
+    let (_, minted_clean) = read_session_with_minted_ids(dir.path()).unwrap();
+    assert!(!minted_clean);
+
+    let mut empty_pane_state = initial(dir.path());
+    if let layout_state::LayoutNodeState::Pane(pane) = &mut empty_pane_state.workspaces[0].layout {
+        pane.tabs.clear();
+        pane.active_tab_id = None;
+    }
+    let canonical = layout_state::canonical_session_path_in(dir.path());
+    fs::write(
+        &canonical,
+        serde_json::to_vec_pretty(&empty_pane_state).unwrap(),
+    )
+    .unwrap();
+    let (_, minted_empty) = read_session_with_minted_ids(dir.path()).unwrap();
+    assert!(minted_empty);
+}
+
+#[test]
+fn merge_groups_preserves_first_duplicate_and_independent_edits() {
+    let make_group = |id: &str, name: &str| layout_state::WorkspaceGroupState {
+        id: id.into(),
+        name: name.into(),
+        color: Some(crate::workspace_color::WorkspaceColor::Blue),
+        collapsed: false,
+        position: 0,
+    };
+    let state_with = |groups: Vec<layout_state::WorkspaceGroupState>| AppSessionState {
+        groups,
+        ..AppSessionState::default()
+    };
+
+    let previous = state_with(vec![
+        make_group("g-edit", "Old"),
+        make_group("g-delete", "Drop"),
+        make_group("g-keep", "Keep"),
+    ]);
+    let local = state_with(vec![
+        make_group("g-edit", "Renamed"),
+        make_group("g-edit", "DuplicateIgnored"),
+        make_group("g-keep", "Keep"),
+        make_group("g-local-new", "LocalNew"),
+    ]);
+    let disk = state_with(vec![
+        make_group("g-edit", "Old"),
+        make_group("g-delete", "Drop"),
+        make_group("g-keep", "DiskEdited"),
+        make_group("g-disk-new", "DiskNew"),
+    ]);
+
+    let merged = merge_groups(&previous, &local, &disk);
+    let names: Vec<(&str, &str)> = merged
+        .iter()
+        .map(|g| (g.id.as_str(), g.name.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("g-edit", "Renamed"),
+            ("g-keep", "DiskEdited"),
+            ("g-local-new", "LocalNew"),
+            ("g-disk-new", "DiskNew"),
+        ]
+    );
+}
+
+#[test]
+fn saved_session_summary_reflects_merged_remote_workspaces_and_restorable_agents() {
+    let dir = tempdir().unwrap();
+    let base = initial(dir.path());
+    let (mut store, _) = SessionStore::load_from_dir(dir.path()).unwrap();
+
+    // Another window adds workspace-3 with a restorable agent to disk.
+    let mut remote = base.clone();
+    let mut ws3 = workspace(3);
+    if let LayoutNodeState::Pane(pane) = &mut ws3.layout {
+        pane.tabs[0].content = layout_state::TabContentState::Terminal {
+            cwd: Some("/tmp".into()),
+            ssh: None,
+            agent: Some(layout_state::RestorableAgentState {
+                kind: layout_state::RestorableAgentKind::Agy,
+                session_id: "remote-agy-1".into(),
+                cwd: Some("/tmp".into()),
+                launch_command: None,
+                restore_on_startup: true,
+            }),
+        };
+    }
+    remote.workspaces.push(ws3);
+    layout_state::save_session_atomic_in(dir.path(), &remote).unwrap();
+
+    // Local window updates workspace-1 with its own restorable agent.
+    let mut local = base;
+    if let LayoutNodeState::Pane(pane) = &mut local.workspaces[0].layout {
+        pane.tabs[0].content = layout_state::TabContentState::Terminal {
+            cwd: Some("/tmp".into()),
+            ssh: None,
+            agent: Some(layout_state::RestorableAgentState {
+                kind: layout_state::RestorableAgentKind::Claude,
+                session_id: "local-claude-1".into(),
+                cwd: Some("/tmp".into()),
+                launch_command: None,
+                restore_on_startup: true,
+            }),
+        };
+    }
+
+    let SaveOutcome::Saved(summary) = store.save(&local).unwrap() else {
+        panic!("expected merged save");
+    };
+    assert_eq!(summary.workspaces, 3);
+    assert_eq!(summary.tabs, 3);
+    assert_eq!(summary.restorable_agents, 2);
 }

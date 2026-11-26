@@ -4,6 +4,18 @@ Short, Claude-oriented companion to [`AGENTS.md`](AGENTS.md). For
 architecture and the full CLI surface, read `AGENTS.md`. For roadmap
 status, read [`docs/cmux-parity-plan.md`](docs/cmux-parity-plan.md).
 
+## This checkout is a fork
+
+You are in `mattmartinez/limux`, not upstream `am-will/limux`. Read [`fork/CODEMAP.md`](fork/CODEMAP.md) before an upstream sync or before editing a file both sides have changed. [`AGENTS.md`](AGENTS.md) has the same rules. Do not drop this section if `CLAUDE.md` conflicts; put it back.
+
+- Merge upstream. Do not rebase, reset onto upstream, or force-push `main`. Open the PR against this fork's `main`, not against `am-will/limux`.
+- `fork/sync-upstream.sh` merges the newest release tag and aborts on conflict. `--main` takes `upstream/main`. A conflict means resolve from the CODEMAP, not take upstream's copy of a shared file.
+- Keep fork card behavior, OSC 7501, `terminal_child_env`, the GBM/NVIDIA browser check, and shell integration on restored agent tabs. Take upstream's other changes.
+- Ghostty pin stays `mattmartinez/ghostty`. Action sizes stay 48/56. If upstream moved the pin, stop and rebase the four OSC 7501 commits; do not switch the submodule to upstream's pin to clear the conflict.
+- Do not commit dirty files you did not write.
+- After a sync: `cargo check` of the crates you touched, then `fork/card-smoke.sh`. `scripts/check.sh` is the full gate.
+
+
 ## What is this project?
 
 Limux is a GTK4 + libadwaita + libghostty terminal workspace manager for

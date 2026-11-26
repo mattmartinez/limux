@@ -12,11 +12,13 @@ use limux_control::socket_path::{resolve_socket_path, SocketMode};
 use limux_protocol::{V2Request, V2Response};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 mod agent_hooks;
 mod agent_team_file;
 mod card;
+mod session_snapshot;
 mod terminal_notifications;
 
 const CLI_STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -57,14 +59,24 @@ enum CommandOutput {
     Json(Value),
 }
 
+struct ClientConnection {
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+}
+
 struct Client {
     socket: PathBuf,
     seq: u64,
+    conn: Option<ClientConnection>,
 }
 
 impl Client {
     fn new(socket: PathBuf) -> Self {
-        Self { socket, seq: 0 }
+        Self {
+            socket,
+            seq: 0,
+            conn: None,
+        }
     }
 
     async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -77,7 +89,7 @@ impl Client {
         self.send_request(request).await
     }
 
-    async fn send_request(&self, request: V2Request) -> Result<Value> {
+    async fn connect(&self) -> Result<ClientConnection> {
         let stream = UnixStream::connect(&self.socket)
             .await
             .with_context(|| format!("failed to connect to socket {}", self.socket.display()))?;
@@ -86,26 +98,59 @@ impl Client {
             limux_control::auth::SocketControlMode::from_env(),
         )
         .with_context(|| format!("untrusted server on socket {}", self.socket.display()))?;
-        let (reader_half, mut writer_half) = stream.into_split();
+        let (reader_half, writer) = stream.into_split();
+        Ok(ClientConnection {
+            reader: BufReader::new(reader_half),
+            writer,
+        })
+    }
 
+    async fn send_request(&mut self, request: V2Request) -> Result<Value> {
         let mut payload = serde_json::to_string(&request).context("failed to encode request")?;
         payload.push('\n');
 
-        writer_half
-            .write_all(payload.as_bytes())
-            .await
-            .context("failed to write request")?;
-        writer_half
-            .flush()
-            .await
-            .context("failed to flush request")?;
+        let mut reused = self.conn.is_some();
+        let line = loop {
+            if self.conn.is_none() {
+                self.conn = Some(self.connect().await?);
+                reused = false;
+            }
+            let conn = self.conn.as_mut().expect("client connection present");
+            let write_result = async {
+                conn.writer.write_all(payload.as_bytes()).await?;
+                conn.writer.flush().await
+            }
+            .await;
+            if let Err(err) = write_result {
+                self.conn = None;
+                if reused {
+                    reused = false;
+                    continue;
+                }
+                return Err(err).context("failed to write request");
+            }
 
-        let mut reader = BufReader::new(reader_half);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .context("failed to read response")?;
+            let mut line = String::new();
+            match conn.reader.read_line(&mut line).await {
+                Ok(0) => {
+                    self.conn = None;
+                    if reused {
+                        reused = false;
+                        continue;
+                    }
+                    bail!("server returned an empty response");
+                }
+                Ok(_) => break line,
+                Err(err) => {
+                    self.conn = None;
+                    if reused {
+                        reused = false;
+                        continue;
+                    }
+                    return Err(err).context("failed to read response");
+                }
+            }
+        };
 
         if line.trim().is_empty() {
             bail!("server returned an empty response");
@@ -269,10 +314,12 @@ Common commands:
   capture-pane (alias of read-screen)
   tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]
   browser [--surface <id|ref>|<surface>] <subcommand> ...
+  save-session
+      Flush the running window's session.json with attached restorable agent sessions.
 
 Agent integrations:
   notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] [--osc] <title>
-  hooks setup [agent] [--osc] | hooks uninstall [agent] | hooks <agent> <event>
+  hooks setup [agent] [--osc] | hooks uninstall [agent] | hooks snapshot [agent] [--dry-run] [--save-session] [--all-sockets] | hooks <agent> <event>
   claude-hook | opencode-hook | gemini-hook | agy-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]
   agent-team [--agents codex,claude[,opencode,gemini,agy]] [--cwd <path>] [--no-launch] [--dry-run]
       Splits the active workspace into one pane per agent (caller's pane stays
@@ -733,6 +780,13 @@ async fn run_activate(client: &mut Client, args: &[String]) -> Result<Value> {
         .await
 }
 
+async fn run_save_session(client: &mut Client, args: &[String]) -> Result<Value> {
+    if !args.is_empty() {
+        bail!("save-session takes no arguments; use --socket <path> before save-session to target an instance");
+    }
+    client.call("session.save", json!({})).await
+}
+
 async fn run_identify(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace");
     let surface = parse_opt(args, "--surface");
@@ -1071,6 +1125,68 @@ fn agy_stop_suppresses_notification(payload: &Value) -> bool {
         || hook_str(payload, &["terminationReason"]) == Some("USER_CANCELED")
 }
 
+fn agy_stop_notification(payload: &Value) -> Option<(String, String)> {
+    if agy_stop_suppresses_notification(payload) {
+        return None;
+    }
+    if let Some(error) = hook_str(payload, &["error"]) {
+        return Some(("Antigravity failed".to_string(), error.to_owned()));
+    }
+    let reason = hook_str(payload, &["terminationReason"]);
+    let body = match reason {
+        Some("ERROR") => "stopped with an error",
+        Some("MAX_INVOCATIONS") => "hit maximum invocations",
+        Some("MAX_FORCED_INVOCATIONS") => "hit maximum forced invocations",
+        Some("MAX_TOKEN_BUDGET_EXCEEDED") => "exceeded token budget",
+        Some("TERMINAL_CUSTOM_HOOK") => "stopped by custom hook",
+        _ => hook_str(payload, &["message", "reason"]).unwrap_or("task complete"),
+    };
+    let title = if reason == Some("ERROR") {
+        "Antigravity failed"
+    } else {
+        "Antigravity finished"
+    };
+    Some((title.to_string(), body.to_owned()))
+}
+
+fn agent_hook_notification(
+    agent: agent_hooks::AgentKind,
+    event: &str,
+    payload: &Value,
+) -> Option<(String, String)> {
+    let agent_label = agent.label();
+    match event {
+        "Notification" | "notification" => Some((
+            format!("{agent_label} needs you"),
+            hook_str(payload, &["message", "notification"])
+                .unwrap_or("waiting for input")
+                .to_owned(),
+        )),
+        "Stop" | "stop" | "finished" => {
+            if agent == agent_hooks::AgentKind::Agy {
+                agy_stop_notification(payload)
+            } else {
+                Some((
+                    format!("{agent_label} finished"),
+                    hook_str(payload, &["message", "reason"])
+                        .unwrap_or("task complete")
+                        .to_owned(),
+                ))
+            }
+        }
+        "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
+        | "prompt-submit" | "PreInvocation" | "pre-invocation" | "PostInvocation"
+        | "post-invocation" | "PreToolUse" | "PostToolUse" | "SubagentStop" | "subagent-stop"
+        | "Cleanup" | "cleanup" | "restore-exit" => None,
+        other => Some((
+            format!("{agent_label}: {other}"),
+            hook_str(payload, &["message", "summary"])
+                .unwrap_or("")
+                .to_owned(),
+        )),
+    }
+}
+
 /// Run an agent hook: read JSON from stdin, synthesize a notification.
 ///
 /// Args:
@@ -1106,37 +1222,8 @@ async fn run_agent_hook(
     }
 
     // Build a human-friendly title + body depending on event + agent.
-    let agent_label = agent.label();
     persist_agent_hook_session(agent, args, &payload, &event)?;
-    let notification_title_body = match event.as_str() {
-        "Notification" | "notification" => Some((
-            format!("{agent_label} needs you"),
-            hook_str(&payload, &["message", "notification"])
-                .unwrap_or("waiting for input")
-                .to_owned(),
-        )),
-        "Stop" | "stop" | "finished" => {
-            if agent == agent_hooks::AgentKind::Agy && agy_stop_suppresses_notification(&payload) {
-                None
-            } else {
-                Some((
-                    format!("{agent_label} finished"),
-                    hook_str(&payload, &["message", "reason"])
-                        .unwrap_or("task complete")
-                        .to_owned(),
-                ))
-            }
-        }
-        "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
-        | "prompt-submit" | "PreToolUse" | "PostToolUse" | "SubagentStop" | "subagent-stop"
-        | "Cleanup" | "cleanup" | "restore-exit" => None,
-        other => Some((
-            format!("{agent_label}: {other}"),
-            hook_str(&payload, &["message", "summary"])
-                .unwrap_or("")
-                .to_owned(),
-        )),
-    };
+    let notification_title_body = agent_hook_notification(agent, &event, &payload);
 
     if let Some((title, body)) = notification_title_body {
         let subtitle = hook_str(
@@ -1213,7 +1300,7 @@ fn agent_hook_output(agent: agent_hooks::AgentKind, event: &str, payload: &Value
     if agent == agent_hooks::AgentKind::Agy {
         return match canonical_event {
             Some("Stop") => json!({ "decision": "allow" }),
-            Some("SessionStart") => match hook_additional_context(payload) {
+            Some("SessionStart" | "PreInvocation") => match hook_additional_context(payload) {
                 Some(context) => json!({
                     "injectSteps": [{
                         "systemMessage": {
@@ -1253,6 +1340,7 @@ fn agent_hook_output(agent: agent_hooks::AgentKind, event: &str, payload: &Value
 fn canonical_hook_event_name(event: &str) -> Option<&'static str> {
     match event {
         "SessionStart" | "session-start" => Some("SessionStart"),
+        "PreInvocation" | "pre-invocation" => Some("PreInvocation"),
         "UserPromptSubmit" | "prompt-submit" => Some("UserPromptSubmit"),
         "Stop" | "stop" | "Notification" => Some("Stop"),
         "SessionEnd" | "session-end" => None,
@@ -1282,6 +1370,24 @@ fn hook_additional_context(payload: &Value) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+fn hook_cwd(payload: &Value) -> Option<String> {
+    hook_str(payload, &["cwd", "working_directory", "directory"])
+        .map(str::to_string)
+        .or_else(|| {
+            payload
+                .get("workspacePaths")
+                .and_then(Value::as_array)
+                .and_then(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .find(|path| !path.is_empty())
+                        .map(str::to_string)
+                })
+        })
+}
+
 fn persist_agent_hook_session(
     agent: agent_hooks::AgentKind,
     args: &[String],
@@ -1289,16 +1395,13 @@ fn persist_agent_hook_session(
     event: &str,
 ) -> Result<()> {
     let Some(session_id) = hook_session_id(agent, payload) else {
-        write_agent_hook_debug(
-            agent,
-            event,
-            "skip_missing_session_id",
-            &json!({
+        write_agent_hook_debug(agent, event, "skip_missing_session_id", || {
+            json!({
                 "payload_keys": payload_keys(payload),
                 "has_claude_code_session_env": limux_env_value("CLAUDE_CODE_SESSION_ID").is_some(),
                 "has_claude_session_env": limux_env_value("CLAUDE_SESSION_ID").is_some(),
-            }),
-        );
+            })
+        });
         return Ok(());
     };
 
@@ -1309,64 +1412,63 @@ fn persist_agent_hook_session(
                 agent_hook_cleanup_scope(args, payload, limux_env_value);
             let result = store.remove(&session_id, workspace_id.as_deref(), surface_id.as_deref());
             if result.is_ok() {
-                write_agent_hook_debug(
-                    agent,
-                    event,
-                    "removed",
-                    &json!({
+                write_agent_hook_debug(agent, event, "removed", || {
+                    json!({
                         "session_id": session_id,
                         "payload_keys": payload_keys(payload),
-                    }),
-                );
+                    })
+                });
             }
             return result;
         }
         AgentHookPersistenceAction::Preserve => {
-            write_agent_hook_debug(
-                agent,
-                event,
-                "preserved",
-                &json!({
+            write_agent_hook_debug(agent, event, "preserved", || {
+                json!({
                     "session_id": session_id,
                     "payload_keys": payload_keys(payload),
-                }),
-            );
+                })
+            });
             return Ok(());
         }
         AgentHookPersistenceAction::Upsert => {}
     }
 
-    let workspace_id = parse_opt(args, "--workspace")
+    let workspace_arg = parse_opt(args, "--workspace");
+    let surface_arg = parse_opt(args, "--surface");
+    let workspace_id = workspace_arg
+        .clone()
         .or_else(|| limux_env_value("LIMUX_WORKSPACE_ID"))
         .filter(|value| !value.trim().is_empty());
-    let surface_id = parse_opt(args, "--surface")
-        .or_else(|| limux_env_value("LIMUX_SURFACE_ID"))
-        .filter(|value| !value.trim().is_empty());
+    let surface_id = if workspace_id.is_some() {
+        surface_arg
+            .clone()
+            .or_else(|| limux_env_value("LIMUX_SURFACE_ID"))
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    };
     let (Some(workspace_id), Some(surface_id)) = (workspace_id, surface_id) else {
-        write_agent_hook_debug(
-            agent,
-            event,
-            "skip_missing_limux_target",
-            &json!({
+        write_agent_hook_debug(agent, event, "skip_missing_limux_target", || {
+            json!({
                 "session_id": session_id,
-                "has_workspace_arg": parse_opt(args, "--workspace").is_some(),
-                "has_surface_arg": parse_opt(args, "--surface").is_some(),
+                "has_workspace_arg": workspace_arg.is_some(),
+                "has_surface_arg": surface_arg.is_some(),
                 "has_workspace_env": limux_env_value("LIMUX_WORKSPACE_ID").is_some(),
                 "has_surface_env": limux_env_value("LIMUX_SURFACE_ID").is_some(),
                 "payload_keys": payload_keys(payload),
-            }),
-        );
+            })
+        });
         return Ok(());
     };
 
-    let ancestor_pid = agent_ancestor_pid(agent);
-    let proc_args = ancestor_pid.and_then(proc_cmdline_args);
+    let ancestor = agent_ancestor_process(agent);
+    let ancestor_pid = ancestor.as_ref().map(|(pid, _)| *pid);
+    let proc_args = ancestor.and_then(|(_, args)| (!args.is_empty()).then_some(args));
     let proc_cwd = ancestor_pid.and_then(proc_cwd_path);
     let proc_env = ancestor_pid.and_then(proc_allowed_environment);
 
     let result = store.update(&session_id, |existing| {
-        let cwd = hook_str(payload, &["cwd", "working_directory", "directory"])
-            .map(str::to_string)
+        let cwd = hook_cwd(payload)
             .or_else(|| proc_cwd.clone())
             .or_else(|| existing.and_then(|record| record.cwd.clone()));
         let pid = hook_str(payload, &["pid"])
@@ -1393,14 +1495,11 @@ fn persist_agent_hook_session(
         }
     });
     if result.is_ok() {
-        write_agent_hook_debug(
-            agent,
-            event,
-            "upserted",
-            &json!({
+        write_agent_hook_debug(agent, event, "upserted", || {
+            json!({
                 "payload_keys": payload_keys(payload),
-            }),
-        );
+            })
+        });
     }
     result
 }
@@ -1482,11 +1581,12 @@ fn write_agent_hook_debug(
     agent: agent_hooks::AgentKind,
     event: &str,
     outcome: &str,
-    details: &Value,
+    details: impl FnOnce() -> Value,
 ) {
     if !agent_hook_debug_enabled() {
         return;
     }
+    let details = details();
     let Some(dir) = agent_hook_debug_dir() else {
         return;
     };
@@ -1553,15 +1653,20 @@ fn limux_env_value(name: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn agent_ancestor_pid(agent: agent_hooks::AgentKind) -> Option<u32> {
+fn agent_ancestor_process(agent: agent_hooks::AgentKind) -> Option<(u32, Vec<String>)> {
     let mut pid = std::process::id();
     for _ in 0..8 {
         let parent = proc_parent_pid(pid)?;
         if parent <= 1 || parent == pid {
             return None;
         }
-        if proc_matches_pid(parent, agent) {
-            return Some(parent);
+        let args = proc_cmdline_args(parent).unwrap_or_default();
+        if limux_control::agent_sessions::proc_matches_agent(&args, None, agent) {
+            return Some((parent, args));
+        }
+        let comm = fs::read_to_string(format!("/proc/{parent}/comm")).ok();
+        if limux_control::agent_sessions::proc_matches_agent(&args, comm.as_deref(), agent) {
+            return Some((parent, args));
         }
         pid = parent;
     }
@@ -1569,15 +1674,8 @@ fn agent_ancestor_pid(agent: agent_hooks::AgentKind) -> Option<u32> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn agent_ancestor_pid(_agent: agent_hooks::AgentKind) -> Option<u32> {
+fn agent_ancestor_process(_agent: agent_hooks::AgentKind) -> Option<(u32, Vec<String>)> {
     None
-}
-
-#[cfg(target_os = "linux")]
-fn proc_matches_pid(pid: u32, agent: agent_hooks::AgentKind) -> bool {
-    let args = proc_cmdline_args(pid).unwrap_or_default();
-    let comm = fs::read_to_string(format!("/proc/{pid}/comm")).ok();
-    limux_control::agent_sessions::proc_matches_agent(&args, comm.as_deref(), agent)
 }
 
 #[cfg(target_os = "linux")]
@@ -1685,7 +1783,7 @@ async fn run_hooks_command(
 ) -> Result<CommandOutput> {
     let Some(first) = args.first().map(String::as_str) else {
         bail!(
-            "Usage: limux hooks setup [agent]|uninstall [agent]|<agent> install|uninstall|<event>"
+            "Usage: limux hooks setup [agent]|uninstall [agent]|snapshot [agent] [--dry-run] [--save-session] [--all-sockets]|<agent> install|uninstall|<event>"
         );
     };
 
@@ -1699,6 +1797,9 @@ async fn run_hooks_command(
             let target = parse_opt(args, "--agent").or_else(|| positional_arg(args, 1));
             let changed = uninstall_hook_targets(target.as_deref())?;
             return hooks_summary_output("uninstalled", changed, json_output);
+        }
+        "snapshot" => {
+            return run_hooks_snapshot(client, &args[1..], json_output).await;
         }
         _ => {}
     }
@@ -1754,6 +1855,175 @@ fn hooks_summary_output(
             }
         )))
     }
+}
+
+fn parse_hooks_snapshot_args(
+    args: &[String],
+    target_socket: PathBuf,
+) -> Result<(session_snapshot::SnapshotOptions, bool)> {
+    let mut agent_name: Option<String> = None;
+    let mut workspace_id: Option<String> = None;
+    let mut surface_id: Option<String> = None;
+    let mut all_sockets = false;
+    let mut dry_run = false;
+    let mut save_session = false;
+
+    let mut set_agent = |value: String| -> Result<()> {
+        if agent_name.is_some() {
+            bail!("duplicate hooks snapshot agent argument: {value}");
+        }
+        agent_name = Some(value);
+        Ok(())
+    };
+
+    let mut idx = 0;
+    while idx < args.len() {
+        let arg = &args[idx];
+        match arg.as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                idx += 1;
+            }
+            "--save-session" => {
+                save_session = true;
+                idx += 1;
+            }
+            "--all-sockets" => {
+                all_sockets = true;
+                idx += 1;
+            }
+            "--agent" | "--workspace" | "--surface" => {
+                let value = args
+                    .get(idx + 1)
+                    .filter(|next| !next.starts_with('-') && !next.trim().is_empty())
+                    .ok_or_else(|| anyhow!("{arg} requires a value"))?;
+                match arg.as_str() {
+                    "--agent" => set_agent(value.clone())?,
+                    "--workspace" => workspace_id = Some(value.clone()),
+                    "--surface" => surface_id = Some(value.clone()),
+                    _ => unreachable!(),
+                }
+                idx += 2;
+            }
+            other if other.starts_with("--agent=") => {
+                let value = other.trim_start_matches("--agent=").trim();
+                if value.is_empty() {
+                    bail!("--agent requires a value");
+                }
+                set_agent(value.to_string())?;
+                idx += 1;
+            }
+            other if other.starts_with("--workspace=") => {
+                let value = other.trim_start_matches("--workspace=").trim();
+                if value.is_empty() {
+                    bail!("--workspace requires a value");
+                }
+                workspace_id = Some(value.to_string());
+                idx += 1;
+            }
+            other if other.starts_with("--surface=") => {
+                let value = other.trim_start_matches("--surface=").trim();
+                if value.is_empty() {
+                    bail!("--surface requires a value");
+                }
+                surface_id = Some(value.to_string());
+                idx += 1;
+            }
+            other if other.starts_with('-') => {
+                bail!("unknown hooks snapshot option: {other}");
+            }
+            positional => {
+                set_agent(positional.to_string())?;
+                idx += 1;
+            }
+        }
+    }
+
+    let agent = agent_name
+        .as_deref()
+        .map(|name| {
+            agent_hooks::AgentKind::from_hook_name(name)
+                .ok_or_else(|| anyhow!("unknown hooks target: {name}"))
+        })
+        .transpose()?;
+
+    Ok((
+        session_snapshot::SnapshotOptions {
+            agent,
+            workspace_id,
+            surface_id,
+            target_socket: Some(target_socket),
+            all_sockets,
+            dry_run,
+        },
+        save_session,
+    ))
+}
+
+async fn run_hooks_snapshot(
+    client: &mut Client,
+    args: &[String],
+    json_output: bool,
+) -> Result<CommandOutput> {
+    let (options, save_session) = parse_hooks_snapshot_args(args, client.socket.clone())?;
+    let dry_run = options.dry_run;
+
+    let report = session_snapshot::snapshot_running_agents(&options)?;
+    let session_save = if save_session && !dry_run {
+        Some(client.call("session.save", json!({})).await?)
+    } else {
+        None
+    };
+
+    if json_output {
+        let mut payload = serde_json::to_value(&report)?;
+        if let (Some(map), Some(saved)) = (payload.as_object_mut(), session_save) {
+            map.insert("session_save".to_string(), saved);
+        }
+        return Ok(CommandOutput::Json(payload));
+    }
+
+    let mut lines = Vec::new();
+    let verb = if report.dry_run {
+        "would capture"
+    } else {
+        "captured"
+    };
+    lines.push(format!(
+        "OK {verb} {} running agent session(s) ({} skipped)",
+        report.captured.len(),
+        report.skipped.len()
+    ));
+    for item in &report.captured {
+        let cwd = item.cwd.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "  {} {} pid={} surface={} cwd={}",
+            item.agent, item.session_id, item.pid, item.surface_id, cwd
+        ));
+    }
+    for item in &report.skipped {
+        let cwd = item.cwd.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "  skipped {} pid={} surface={} cwd={} ({})",
+            item.agent, item.pid, item.surface_id, cwd, item.reason
+        ));
+    }
+    if let Some(saved) = session_save {
+        if let Some(path) = saved.get("path").and_then(Value::as_str) {
+            let workspaces = saved.get("workspaces").and_then(Value::as_u64).unwrap_or(0);
+            let tabs = saved.get("tabs").and_then(Value::as_u64).unwrap_or(0);
+            let agents = saved
+                .get("restorable_agents")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            lines.push(format!(
+                "OK saved session to {path} ({workspaces} workspaces, {tabs} tabs, {agents} restorable agents)"
+            ));
+        } else {
+            lines.push("OK saved session".to_string());
+        }
+    }
+    Ok(CommandOutput::Text(lines.join("\n")))
 }
 
 fn install_hook_targets(target: Option<&str>, osc: bool) -> Result<Vec<String>> {
@@ -1873,6 +2143,16 @@ fn install_agy_hooks(path: &Path, osc: bool) -> Result<()> {
                 "command": hook_command_with_fallback(
                     agent_hooks::AgentKind::Agy,
                     "session-start",
+                    osc,
+                    "{}",
+                )?,
+                "timeout": hook_timeout(agent_hooks::AgentKind::Agy)
+            }],
+            "PreInvocation": [{
+                "type": "command",
+                "command": hook_command_with_fallback(
+                    agent_hooks::AgentKind::Agy,
+                    "pre-invocation",
                     osc,
                     "{}",
                 )?,
@@ -4465,6 +4745,27 @@ async fn execute_command(client: &mut Client, opts: &GlobalOptions) -> Result<Co
                 CommandOutput::Text("OK".to_string())
             }
         }
+        "save-session" => {
+            let payload = run_save_session(client, args).await?;
+            if opts.json_output {
+                CommandOutput::Json(payload)
+            } else if let Some(path) = payload.get("path").and_then(Value::as_str) {
+                let workspaces = payload
+                    .get("workspaces")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let tabs = payload.get("tabs").and_then(Value::as_u64).unwrap_or(0);
+                let agents = payload
+                    .get("restorable_agents")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                CommandOutput::Text(format!(
+                    "OK saved {path} ({workspaces} workspaces, {tabs} tabs, {agents} restorable agents)"
+                ))
+            } else {
+                CommandOutput::Text("OK".to_string())
+            }
+        }
         "identify" => CommandOutput::Json(run_identify(client, args).await?),
         "list-panels" | "list-panes" | "list-workspaces" | "surface-health" => {
             let payload = run_list(client, command, args).await?;
@@ -5228,6 +5529,14 @@ mod cli_arg_tests {
         assert_eq!(
             agent_hook_output(
                 agent_hooks::AgentKind::Agy,
+                "pre-invocation",
+                &json!({ "conversationId": "conv-1", "invocationNum": 2 }),
+            ),
+            json!({})
+        );
+        assert_eq!(
+            agent_hook_output(
+                agent_hooks::AgentKind::Agy,
                 "session-start",
                 &json!({
                     "conversationId": "conv-1",
@@ -5242,6 +5551,23 @@ mod cli_arg_tests {
                 }]
             })
         );
+        assert_eq!(
+            agent_hook_output(
+                agent_hooks::AgentKind::Agy,
+                "PreInvocation",
+                &json!({
+                    "conversationId": "conv-1",
+                    "additionalContext": "Turn context"
+                }),
+            ),
+            json!({
+                "injectSteps": [{
+                    "systemMessage": {
+                        "systemMessage": "Turn context"
+                    }
+                }]
+            })
+        );
         assert!(agy_stop_suppresses_notification(
             &json!({ "terminationReason": "USER_CANCELED" })
         ));
@@ -5251,6 +5577,63 @@ mod cli_arg_tests {
         assert!(!agy_stop_suppresses_notification(
             &json!({ "terminationReason": "NO_TOOL_CALL", "fullyIdle": true })
         ));
+        assert_eq!(
+            agent_hook_notification(
+                agent_hooks::AgentKind::Agy,
+                "PreInvocation",
+                &json!({ "conversationId": "conv-1" }),
+            ),
+            None
+        );
+        assert_eq!(
+            agent_hook_notification(
+                agent_hooks::AgentKind::Agy,
+                "PostInvocation",
+                &json!({ "conversationId": "conv-1" }),
+            ),
+            None
+        );
+        assert_eq!(
+            agent_hook_notification(
+                agent_hooks::AgentKind::Agy,
+                "stop",
+                &json!({ "terminationReason": "ERROR", "error": "rate limit exceeded", "fullyIdle": true }),
+            ),
+            Some((
+                "Antigravity failed".to_string(),
+                "rate limit exceeded".to_string(),
+            ))
+        );
+        assert_eq!(
+            agent_hook_notification(
+                agent_hooks::AgentKind::Agy,
+                "stop",
+                &json!({ "terminationReason": "MAX_TOKEN_BUDGET_EXCEEDED", "fullyIdle": true }),
+            ),
+            Some((
+                "Antigravity finished".to_string(),
+                "exceeded token budget".to_string(),
+            ))
+        );
+        assert_eq!(
+            agent_hook_notification(
+                agent_hooks::AgentKind::Agy,
+                "stop",
+                &json!({ "terminationReason": "NO_TOOL_CALL", "fullyIdle": true }),
+            ),
+            Some((
+                "Antigravity finished".to_string(),
+                "task complete".to_string(),
+            ))
+        );
+        assert_eq!(
+            hook_cwd(&json!({ "workspacePaths": ["", "/tmp/agy-ws", "/tmp/other"] })),
+            Some("/tmp/agy-ws".to_string())
+        );
+        assert_eq!(
+            hook_cwd(&json!({ "cwd": "/tmp/explicit", "workspacePaths": ["/tmp/agy-ws"] })),
+            Some("/tmp/explicit".to_string())
+        );
     }
 
     #[test]
@@ -5280,6 +5663,15 @@ mod cli_arg_tests {
             .as_str()
             .unwrap()
             .contains("hooks agy session-start"));
+        assert_eq!(installed["limux"]["PreInvocation"][0]["timeout"], 5);
+        assert!(installed["limux"]["PreInvocation"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("hooks agy pre-invocation"));
+        assert!(installed["limux"]["PreInvocation"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("echo '{}'"));
         assert!(installed["limux"]["Stop"][0]["command"]
             .as_str()
             .unwrap()
@@ -6463,6 +6855,7 @@ mod new_pane_tests {
         let mut client = super::Client {
             socket: socket_path,
             seq: 1,
+            conn: None,
         };
         let cli_args = vec![
             "--surface".to_string(),
@@ -6543,5 +6936,40 @@ mod new_pane_tests {
         assert_eq!(click.surface.as_deref(), Some("surface:3"));
         assert_eq!(click.subcommand, "click");
         assert!(click.rest.is_empty());
+    }
+
+    #[test]
+    fn hooks_snapshot_args_validate_flags_equals_forms_and_duplicates() {
+        let sock = PathBuf::from("/tmp/limux.sock");
+        let (opts, save) = parse_hooks_snapshot_args(
+            &args(&[
+                "agy",
+                "--workspace=ws-1",
+                "--surface",
+                "1:tab-a",
+                "--dry-run",
+                "--save-session",
+                "--all-sockets",
+            ]),
+            sock.clone(),
+        )
+        .expect("valid snapshot args");
+        assert_eq!(opts.agent, Some(agent_hooks::AgentKind::Agy));
+        assert_eq!(opts.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(opts.surface_id.as_deref(), Some("1:tab-a"));
+        assert!(opts.dry_run);
+        assert!(opts.all_sockets);
+        assert!(save);
+
+        assert!(parse_hooks_snapshot_args(&args(&["--dryrun"]), sock.clone()).is_err());
+        assert!(parse_hooks_snapshot_args(&args(&["--save"]), sock.clone()).is_err());
+        assert!(parse_hooks_snapshot_args(&args(&["--workspace"]), sock.clone()).is_err());
+        assert!(
+            parse_hooks_snapshot_args(&args(&["--workspace", "--dry-run"]), sock.clone()).is_err()
+        );
+        assert!(parse_hooks_snapshot_args(&args(&["claude", "codex"]), sock.clone()).is_err());
+        assert!(
+            parse_hooks_snapshot_args(&args(&["--agent=claude", "codex"]), sock.clone()).is_err()
+        );
     }
 }
