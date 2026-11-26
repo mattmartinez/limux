@@ -12,6 +12,7 @@ use crate::app_config::{
 use crate::gui_hooks::{GuiHook, GuiHookEvent, GuiHooksConfig};
 use crate::keybind_editor;
 use crate::shortcut_config::{NormalizedShortcut, ResolvedShortcutConfig, ShortcutId};
+use crate::workspace_color::SELECTION_FILL;
 
 pub const SETTINGS_CSS: &str = r#"
 .limux-settings-window {
@@ -35,7 +36,7 @@ const UI_SCALE_DESCRIPTORS: &[UiScaleDescriptor] = &[
     UiScaleDescriptor {
         selector: ".limux-ws-name",
         property: "font-size",
-        base_size: 15.0,
+        base_size: 12.0,
     },
     UiScaleDescriptor {
         selector: ".limux-ws-star-btn",
@@ -60,7 +61,7 @@ const UI_SCALE_DESCRIPTORS: &[UiScaleDescriptor] = &[
     UiScaleDescriptor {
         selector: ".limux-ws-path",
         property: "font-size",
-        base_size: 12.0,
+        base_size: 11.0,
     },
     UiScaleDescriptor {
         selector: ".limux-tab",
@@ -116,8 +117,8 @@ pub fn ui_scale_css(config: &AppConfig) -> String {
     rules.push(format!(
         ".limux-indicator-unread-dot, .limux-notify-dot, .limux-tab-unread-dot {{ color: {c}; }}\n\
          .limux-notify-msg-unread {{ color: alpha({c}, 0.9); }}\n\
-         .limux-sidebar-row-unread {{ background-color: alpha({c}, 0.14); border-left: 3px solid {c}; }}\n\
-         .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {{ background: alpha({c}, 0.18); border-left: 3px solid {c}; }}"
+         .limux-sidebar-row-unread {{ background-color: transparent; border-left: none; box-shadow: inset 3px 0 0 0 {c}; }}\n\
+         .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {{ background: {SELECTION_FILL}; border-left: none; box-shadow: none; }}"
     ));
     rules.join("\n")
 }
@@ -636,7 +637,7 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
 
     let top_bar_row = adw::ActionRow::builder()
         .title("Top bar")
-        .subtitle("Show a top bar with workspace indicators. When off, the controls move into the sidebar header. If the sidebar is also hidden, its toggle remains on the leading pane.")
+        .subtitle("Show the toolbar. When off, the controls move into the sidebar header. If the sidebar is also hidden, its toggle remains on the leading pane.")
         .build();
     top_bar_row.set_title_lines(1);
     top_bar_row.set_subtitle_lines(4);
@@ -647,18 +648,6 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     top_bar_row.set_activatable_widget(Some(&top_bar_switch));
     group.add(&top_bar_row);
 
-    let indicators_row = adw::ActionRow::builder()
-        .title("Workspace indicators on the top bar")
-        .subtitle("Show a clickable pill for each workspace in the top bar")
-        .build();
-    indicators_row.set_title_lines(1);
-    indicators_row.set_subtitle_lines(2);
-    let indicators_switch = gtk::Switch::new();
-    indicators_switch.set_active(input.config.borrow().interface.show_workspace_indicators);
-    indicators_switch.set_valign(gtk::Align::Center);
-    indicators_row.add_suffix(&indicators_switch);
-    indicators_row.set_activatable_widget(Some(&indicators_switch));
-    group.add(&indicators_row);
 
     let tab_activity_row = adw::ActionRow::builder()
         .title("Tab activity indicators")
@@ -908,30 +897,6 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     {
         let config = input.config.clone();
         let on_changed = input.on_config_changed.clone();
-        let syncing = Rc::new(Cell::new(false));
-        indicators_switch.connect_active_notify(move |switch| {
-            if syncing.get() {
-                return;
-            }
-            let show_workspace_indicators = switch.is_active();
-            if show_workspace_indicators == config.borrow().interface.show_workspace_indicators {
-                return;
-            }
-            let effective = apply_config_change(&config, &*on_changed, move |c| {
-                c.interface.show_workspace_indicators = show_workspace_indicators;
-            })
-            .interface
-            .show_workspace_indicators;
-            if switch.is_active() != effective {
-                syncing.set(true);
-                switch.set_active(effective);
-                syncing.set(false);
-            }
-        });
-    }
-    {
-        let config = input.config.clone();
-        let on_changed = input.on_config_changed.clone();
         let timeout_row = tab_activity_timeout_row.clone();
         let syncing = Rc::new(Cell::new(false));
         tab_activity_switch.connect_active_notify(move |switch| {
@@ -1164,7 +1129,7 @@ mod tests {
                 }
             }),
         });
-        for title in ["Top bar", "Workspace indicators on the top bar"] {
+        for title in ["Top bar"] {
             let switch = find_control(&page, title)
                 .expect("settings control")
                 .downcast::<gtk::Switch>()
@@ -1441,7 +1406,7 @@ mod tests {
 
         let css = ui_scale_css(&config);
 
-        assert!(css.contains(".limux-ws-name { font-size: 22.500px; }"));
+        assert!(css.contains(".limux-ws-name { font-size: 18.000px; }"));
         assert!(css.contains(".limux-tab { font-size: 18.000px; }"));
         assert!(css.contains(".limux-pane-action image { -gtk-icon-size: 24.000px; }"));
     }

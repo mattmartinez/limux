@@ -115,18 +115,12 @@ fn hex((r, g, b): (u8, u8, u8)) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
-/// Mix a colour toward black by `percent`, for rows that are not selected.
-fn darken((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
-    let mix = |channel: u8| (u16::from(channel) * (100 - percent) / 100) as u8;
-    (mix(r), mix(g), mix(b))
-}
+/// cmux sidebar selection fill, sampled from the app (`#3E90F7`).
+pub const SELECTION_FILL: &str = "#3e90f7";
+/// cmux chrome black. The reference config sets `sidebarAppearance.tintColor` to `#000000`.
+pub const CHROME_BLACK: &str = "#000000";
 
-/// How far an unselected row's colour is dimmed, at rest and under the pointer.
-const DIM_PERCENT: u16 = 45;
-const DIM_HOVER_PERCENT: u16 = 28;
-const SECONDARY_TEXT_ALPHA: f64 = 1.0;
-
-/// Mix a colour toward white by `percent`, for the selected row's hover state.
+/// Mix a colour toward white by `percent`, for swatch hover.
 fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
     let mix = |channel: u8| {
         let channel = u16::from(channel);
@@ -137,32 +131,6 @@ fn lighten((r, g, b): (u8, u8, u8), percent: u16) -> (u8, u8, u8) {
 
 const SHARED_CSS: &str = r#"
 /* ---------- Coloured workspace rows ---------- */
-.limux-sidebar-list row:selected .limux-sidebar-row-box.limux-ws-colored {
-    box-shadow: inset 0 0 0 2px alpha(white, 0.9);
-}
-.limux-sidebar-list row .limux-ws-colored .limux-ws-name {
-    color: alpha(white, 0.88);
-}
-.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-name {
-    color: white;
-}
-.limux-sidebar-list row .limux-ws-colored .limux-notify-msg-unread,
-.limux-sidebar-list row .limux-ws-colored .limux-notify-dot {
-    color: white;
-}
-.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn,
-.limux-sidebar-list row:selected .limux-ws-colored .limux-ws-star-btn,
-.limux-sidebar-list row .limux-ws-colored .limux-ws-close-btn {
-    color: alpha(white, 0.8);
-}
-.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn:hover,
-.limux-sidebar-list row .limux-ws-colored .limux-ws-star-btn-active,
-.limux-sidebar-list row .limux-ws-colored .limux-ws-close-btn:hover {
-    color: white;
-}
-.limux-sidebar-row-unread.limux-ws-colored {
-    border-left-color: white;
-}
 /* The colour sits on a label inside the button: a theme installed as user
    CSS (~/.config/gtk-4.0/gtk.css) out-ranks application CSS for buttons. */
 .limux-ws-color-swatch {
@@ -196,29 +164,31 @@ button.limux-ws-color-swatch-btn {
 "#;
 
 /// CSS for coloured rows and the menu swatches, generated from the palette.
+///
+/// A workspace colour is a 3px left rail, the way cmux marks a card. The
+/// selected row always uses [`SELECTION_FILL`], not the workspace colour.
 pub fn workspace_color_css() -> String {
     let mut css = String::from(SHARED_CSS);
-    css.push_str(&format!(
-        ".limux-sidebar-list row .limux-ws-colored .limux-ws-path,\n\
-         .limux-sidebar-list row:selected .limux-ws-colored .limux-ws-path,\n\
-         .limux-sidebar-list row .limux-ws-colored .limux-notify-msg {{\n\
-             color: alpha(white, {SECONDARY_TEXT_ALPHA});\n\
-         }}\n"
-    ));
     for color in WorkspaceColor::ALL {
         let class = color.css_class();
         let base = hex(color.rgb());
         let hover = hex(lighten(color.rgb(), 12));
-        let dim = hex(darken(color.rgb(), DIM_PERCENT));
-        let dim_hover = hex(darken(color.rgb(), DIM_HOVER_PERCENT));
-        // The extra class out-ranks the generic hover/selected row backgrounds.
-        // Only the selected row shows the full colour; the others are dimmed.
+        // The colour class out-ranks the generic hover and selected backgrounds.
         css.push_str(&format!(
-            ".limux-sidebar-list row .limux-sidebar-row-box.{class} {{\n    background: {dim};\n}}\n\
-             .limux-sidebar-list row:hover .limux-sidebar-row-box.{class} {{\n    background: {dim_hover};\n}}\n\
+            ".limux-sidebar-list row .limux-sidebar-row-box.{class} {{\n\
+                 background: transparent;\n\
+                 box-shadow: inset 3px 0 0 0 {base};\n\
+             }}\n\
+             .limux-sidebar-list row:hover .limux-sidebar-row-box.{class} {{\n\
+                 background: alpha(@window_fg_color, 0.06);\n\
+                 box-shadow: inset 3px 0 0 0 {base};\n\
+             }}\n\
              .limux-sidebar-list row:selected .limux-sidebar-row-box.{class},\n\
+             .limux-sidebar-list row:selected:hover .limux-sidebar-row-box.{class} {{\n\
+                 background: {SELECTION_FILL};\n\
+                 box-shadow: none;\n\
+             }}\n\
              .{SWATCH_CSS_CLASS}.{class} {{\n    background: {base};\n}}\n\
-             .limux-sidebar-list row:selected:hover .limux-sidebar-row-box.{class},\n\
              button:hover > .{SWATCH_CSS_CLASS}.{class} {{\n    background: {hover};\n}}\n"
         ));
     }
@@ -273,7 +243,7 @@ mod tests {
     #[test]
     fn every_color_is_readable_under_white_text() {
         for color in WorkspaceColor::ALL {
-            // The hover state is the lightest the row background gets.
+            // Swatch hover is the lightest a colour is painted under white text.
             for rgb in [color.rgb(), lighten(color.rgb(), 12)] {
                 let contrast = contrast_with_white(rgb);
                 assert!(
@@ -287,33 +257,27 @@ mod tests {
     }
 
     #[test]
-    fn secondary_text_is_readable_in_every_row_state() {
+    fn rows_use_a_left_rail_and_the_standard_selection() {
+        let css = workspace_color_css();
+        assert!(css.contains(SELECTION_FILL));
         for color in WorkspaceColor::ALL {
-            for background in [
-                darken(color.rgb(), DIM_PERCENT),
-                darken(color.rgb(), DIM_HOVER_PERCENT),
-                color.rgb(),
-                lighten(color.rgb(), 12),
-            ] {
-                let composite = |channel: u8| {
-                    (255.0 * SECONDARY_TEXT_ALPHA
-                        + f64::from(channel) * (1.0 - SECONDARY_TEXT_ALPHA))
-                        .round() as u8
-                };
-                let foreground = (
-                    composite(background.0),
-                    composite(background.1),
-                    composite(background.2),
-                );
-                let contrast = (relative_luminance(foreground) + 0.05)
-                    / (relative_luminance(background) + 0.05);
-                assert!(
-                    contrast >= 4.5,
-                    "{} on {} has secondary-text contrast {contrast:.2}",
-                    color.as_str(),
-                    hex(background),
-                );
-            }
+            let class = color.css_class();
+            let base = hex(color.rgb());
+            assert!(
+                css.contains(&format!("box-shadow: inset 3px 0 0 0 {base};")),
+                "{class} is missing its left rail"
+            );
+            let selected =
+                format!(".limux-sidebar-list row:selected .limux-sidebar-row-box.{class},");
+            let rule = css
+                .split(&selected)
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or("");
+            assert!(
+                rule.contains(SELECTION_FILL) && !rule.contains(&format!("background: {base}")),
+                "{class} selected row does not use the standard selection fill: {rule}"
+            );
         }
     }
 
@@ -323,19 +287,14 @@ mod tests {
         for color in WorkspaceColor::ALL {
             let class = color.css_class();
             assert!(css.contains(&format!(".limux-sidebar-row-box.{class}")));
-            assert!(css.contains(&format!("\n.{SWATCH_CSS_CLASS}.{class} {{")));
+            assert!(css.contains(&format!(".{SWATCH_CSS_CLASS}.{class} {{")));
             // Themes loaded as user CSS restyle buttons, so no swatch colour
             // may depend on a button background.
             assert!(!css.contains(&format!("button.{SWATCH_CSS_CLASS}.{class}")));
             assert!(css.contains(&hex(color.rgb())));
-            // Unselected rows are dimmed, so they stay darker than the selected one.
-            let dim = darken(color.rgb(), DIM_PERCENT);
-            assert!(css.contains(&hex(dim)));
-            assert!(relative_luminance(dim) < relative_luminance(color.rgb()));
         }
-        assert!(css.contains(COLORED_ROW_CSS_CLASS));
         assert!(css.contains(&format!(
-            "\n.{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS} {{"
+            ".{SWATCH_CSS_CLASS}.{NO_COLOR_SWATCH_CSS_CLASS} {{"
         )));
         assert!(SWATCH_BUTTON_CSS.contains(&format!("button.{SWATCH_BUTTON_CSS_CLASS} {{")));
     }

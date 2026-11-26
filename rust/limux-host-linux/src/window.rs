@@ -1524,6 +1524,10 @@ const BASE_CSS: &str = r#"
        Adwaita's row adds its own vertical padding; give the first row the
        same leading-space by adding an extra margin-top on it. */
 }
+.limux-sidebar viewport,
+.limux-sidebar scrolledwindow {
+    background-color: transparent;
+}
 .limux-sidebar-list row:first-child .limux-sidebar-row-box {
     margin-top: 4px;
 }
@@ -1538,74 +1542,78 @@ const BASE_CSS: &str = r#"
     outline: none;
 }
 .limux-sidebar-row-box {
-    padding: 8px 10px 8px 10px;
+    padding: 8px 10px;
     border-radius: 8px;
-    margin: 1px 6px;
+    margin: 4px 8px;
 }
 .limux-sidebar-list row:hover .limux-sidebar-row-box {
-    background: alpha(@window_fg_color, 0.05);
+    background: alpha(@window_fg_color, 0.06);
 }
-.limux-sidebar-list row:selected .limux-sidebar-row-box {
-    background: alpha(@window_fg_color, 0.16);
-    box-shadow: inset 0 0 0 2px alpha(@window_fg_color, 0.9);
+.limux-sidebar-list row:selected .limux-sidebar-row-box,
+.limux-sidebar-list row:selected:hover .limux-sidebar-row-box {
+    background: #3e90f7;
+    box-shadow: none;
 }
 .limux-ws-name {
-    color: alpha(@window_fg_color, 0.65);
-    font-size: 13px;
+    color: alpha(@window_fg_color, 0.92);
+    font-size: 12px;
     font-weight: 500;
 }
 .limux-sidebar-list row:selected .limux-ws-name {
-    color: @window_fg_color;
-    font-weight: 600;
+    color: white;
+    font-weight: 500;
 }
 .limux-ws-star-btn {
     background: transparent;
-    color: alpha(@window_fg_color, 0.3);
+    color: alpha(@window_fg_color, 0.55);
     border: none;
     border-radius: 4px;
-    min-height: 20px;
-    min-width: 20px;
     padding: 0;
     font-size: 12px;
-    opacity: 0;
     transition: opacity 150ms ease;
 }
-.limux-sidebar-list row:hover .limux-ws-star-btn,
-.limux-sidebar-list row:selected .limux-ws-star-btn {
-    opacity: 1;
-}
 .limux-ws-star-btn:hover {
-    color: alpha(@window_fg_color, 0.9);
-}
-.limux-sidebar-list row:selected .limux-ws-star-btn {
-    color: alpha(@window_fg_color, 0.6);
+    color: @window_fg_color;
 }
 .limux-ws-star-btn-active {
     color: @accent_bg_color;
-    opacity: 1;
 }
 
-/* Workspace row close X — visible on hover/selected */
+/* Workspace row close X — visible on hover, not while merely selected. */
 .limux-ws-close-btn {
     background: transparent;
-    color: alpha(@window_fg_color, 0.35);
+    color: alpha(@window_fg_color, 0.55);
     border: none;
     border-radius: 4px;
-    min-height: 20px;
-    min-width: 20px;
     padding: 0;
     margin: 0;
-    opacity: 0;
-    -gtk-icon-size: 12px;
     transition: opacity 150ms ease;
-}
-.limux-sidebar-list row:hover .limux-ws-close-btn,
-.limux-sidebar-list row:selected .limux-ws-close-btn {
-    opacity: 1;
 }
 .limux-ws-close-btn:hover {
     background: alpha(@window_fg_color, 0.1);
     color: @window_fg_color;
+}
+.limux-sidebar-list row:selected .limux-ws-star-btn,
+.limux-sidebar-list row:selected .limux-ws-close-btn {
+    color: white;
+}
+/* Hidden controls take no width, so the title can use the row. */
+.limux-sidebar-list .limux-ws-star-btn,
+.limux-sidebar-list .limux-ws-close-btn {
+    opacity: 0;
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+    margin: 0;
+    -gtk-icon-size: 12px;
+}
+.limux-sidebar-list row:hover .limux-ws-star-btn,
+.limux-sidebar-list row:hover .limux-ws-close-btn,
+.limux-sidebar-list .limux-ws-star-btn.limux-ws-star-btn-active {
+    opacity: 1;
+    min-width: 20px;
+    min-height: 20px;
+    -gtk-icon-size: 12px;
 }
 .limux-ws-rename-entry {
     min-height: 0;
@@ -1617,28 +1625,32 @@ const BASE_CSS: &str = r#"
     font-size: 8px;
     margin-right: 6px;
 }
-.limux-notify-dot-hidden {
+.limux-sidebar-list .limux-notify-dot-hidden {
     color: transparent;
-    font-size: 8px;
-    margin-right: 6px;
+    font-size: 0;
+    margin-right: 0;
+    min-width: 0;
 }
 .limux-notify-msg {
-    color: alpha(@window_fg_color, 0.3);
+    color: alpha(@window_fg_color, 0.55);
     font-size: 11px;
 }
 .limux-notify-msg-unread {
     color: alpha(#f59e0b, 0.9);
     font-size: 11px;
 }
+.limux-sidebar-list row:selected .limux-notify-msg,
+.limux-sidebar-list row:selected .limux-notify-msg-unread {
+    color: white;
+}
 .limux-sidebar-row-unread {
-    background-color: alpha(#f59e0b, 0.14);
-    border-left: 3px solid #f59e0b;
-    border-radius: 8px;
-    margin-left: 3px;
+    background-color: transparent;
+    box-shadow: inset 3px 0 0 0 #f59e0b;
+    border-radius: 6px;
 }
 .limux-sidebar-list row:selected .limux-sidebar-row-box.limux-sidebar-row-unread {
-    background: alpha(#f59e0b, 0.18);
-    border-left: 3px solid #f59e0b;
+    background: #3e90f7;
+    box-shadow: none;
 }
 .limux-sidebar-row-unread .limux-ws-name {
     color: @window_fg_color;
@@ -1695,11 +1707,11 @@ const BASE_CSS: &str = r#"
     border-color: alpha(@accent_bg_color, 0.9);
 }
 .limux-ws-path {
-    color: alpha(@window_fg_color, 0.3);
+    color: alpha(@window_fg_color, 0.55);
     font-size: 11px;
 }
 .limux-sidebar-list row:selected .limux-ws-path {
-    color: alpha(@window_fg_color, 0.45);
+    color: alpha(white, 0.92);
 }
 .limux-content {
     background-color: @window_bg_color;
@@ -1713,7 +1725,7 @@ const BASE_CSS: &str = r#"
 }
 "#;
 
-const CONTENT_BACKGROUND_RGB: (u8, u8, u8) = (23, 23, 23);
+const CONTENT_BACKGROUND_RGB: (u8, u8, u8) = (0, 0, 0);
 
 /// Squares off the CSD window corners and drops the client-side shadow
 /// when the compositor draws the window decorations (see
@@ -1739,6 +1751,101 @@ fn compositor_provides_decorations() -> bool {
         .unwrap_or(false)
 }
 
+fn chrome_css() -> String {
+    let black = workspace_color::CHROME_BLACK;
+    format!(
+        "\
+@media (prefers-color-scheme: dark) {{
+    window,
+    window.background,
+    .limux-sidebar,
+    .limux-top-bar,
+    .limux-pane-header,
+    .limux-settings-window,
+    .limux-keybind-editor {{
+        background-color: {black};
+    }}
+    .limux-sidebar {{
+        border-right-color: alpha(white, 0.08);
+    }}
+    .limux-top-bar,
+    .limux-pane-header {{
+        border-bottom-color: alpha(white, 0.08);
+    }}
+}}
+"
+    )
+}
+
+/// Beats Libadwaita. Its `row:selected` rule paints a 25% accent wash, which
+/// hides the solid cmux blue when these rules stay at application priority.
+const CMUX_OVERRIDE_CSS: &str = "\
+@define-color window_bg_color #000000;\n\
+@define-color headerbar_bg_color #000000;\n\
+@define-color headerbar_backdrop_color #000000;\n\
+@define-color view_bg_color #000000;\n\
+@define-color sidebar_bg_color #000000;\n\
+window,\n\
+window.background,\n\
+headerbar,\n\
+headerbar box,\n\
+window.csd headerbar,\n\
+window.csd .titlebar,\n\
+.titlebar,\n\
+.limux-sidebar,\n\
+.limux-sidebar viewport,\n\
+.limux-sidebar scrolledwindow,\n\
+.limux-sidebar-list,\n\
+.limux-top-bar,\n\
+.limux-pane-header {\n\
+    background-color: #000000;\n\
+    background-image: none;\n\
+    box-shadow: none;\n\
+}\n\
+.limux-sidebar-list row,\n\
+.limux-sidebar-list row:selected,\n\
+.limux-sidebar-list row:selected:hover {\n\
+    background-color: transparent;\n\
+    background-image: none;\n\
+    box-shadow: none;\n\
+    padding: 0;\n\
+    min-height: 0;\n\
+}\n\
+.limux-sidebar-row-box {\n\
+    border-radius: 8px;\n\
+    margin: 4px 8px;\n\
+}\n\
+.limux-sidebar-list row:selected .limux-sidebar-row-box,\n\
+.limux-sidebar-list row:selected:hover .limux-sidebar-row-box {\n\
+    background-color: #3e90f7;\n\
+    background-image: none;\n\
+    box-shadow: none;\n\
+}\n\
+.limux-sidebar-list row:selected .limux-ws-name,\n\
+.limux-sidebar-list row:selected .limux-ws-path,\n\
+.limux-sidebar-list row:selected .limux-ws-branch,\n\
+.limux-sidebar-list row:selected .limux-ws-status-row,\n\
+.limux-sidebar-list row:selected .limux-ws-description {\n\
+    color: #ffffff;\n\
+}\n\
+.limux-ws-name,\n\
+.limux-sidebar-list row:selected .limux-ws-name {\n\
+    font-size: 12px;\n\
+    font-weight: 500;\n\
+}\n\
+.limux-indicator-pill-active,\n\
+.limux-indicator-pill-active:hover {\n\
+    background-color: transparent;\n\
+    box-shadow: none;\n\
+    font-weight: 500;\n\
+}\n\
+.limux-sidebar-ssh {\n\
+    background-color: transparent;\n\
+    color: alpha(white, 0.45);\n\
+    font-weight: 500;\n\
+}\n\
+";
+
 fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
     let ssd_css = if compositor_provides_decorations() {
         SSD_CSS
@@ -1746,7 +1853,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ""
     };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         build_window_css(background_opacity),
         pane::PANE_CSS,
         crate::terminal::CLIPBOARD_TOAST_CSS,
@@ -1756,6 +1863,7 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
         ssd_css,
         workspace_color::workspace_color_css(),
         sidebar_groups::workspace_group_css(),
+        chrome_css(),
     )
 }
 
@@ -1814,6 +1922,13 @@ pub fn build_window(app: &adw::Application) {
     gtk::style_context_add_provider_for_display(
         &display,
         &swatch_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
+    );
+    let cmux_provider = gtk::CssProvider::new();
+    cmux_provider.load_from_data(CMUX_OVERRIDE_CSS);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &cmux_provider,
         gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
     );
 
@@ -2075,6 +2190,8 @@ pub fn build_window(app: &adw::Application) {
     sidebar.append(&sidebar_header_handle);
     sidebar.append(&sidebar_scroll);
     let ssh_button = gtk::Button::with_label("Connect via SSH…");
+    ssh_button.add_css_class("flat");
+    ssh_button.add_css_class("limux-sidebar-ssh");
     ssh_button.set_tooltip_text(Some("Open an SSH connection in a new workspace"));
     sidebar.append(&ssh_button);
 
@@ -3729,7 +3846,7 @@ pub(crate) fn apply_top_bar_mode(state: &State) {
 /// collapsed-sidebar layout when the leading pane is momentarily missing during
 /// a workspace rebuild; the retry runs with `false` so it can never loop.
 fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
-    let (show_top_bar, controls_side, show_workspace_indicators, sidebar_visible_now, widgets) = {
+    let (show_top_bar, controls_side, sidebar_visible_now, widgets) = {
         let s = state.borrow();
         let config = s.config.borrow();
         let (
@@ -3778,7 +3895,6 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
                 gtk::prelude::GtkWindowExt::is_fullscreen(&s.window),
             ),
             config.interface.window_controls_side,
-            config.interface.show_workspace_indicators,
             // Just the widget's visible property — the paned position can be
             // stale during animations or startup; we don't want to misclassify
             // a set_visible(true) sidebar as closed.
@@ -3790,9 +3906,10 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     {
         let s = state.borrow();
         for ws in &s.workspaces {
-            ws.indicator_button.set_visible(show_workspace_indicators);
+            ws.indicator_button.set_visible(false);
         }
     }
+    widgets.indicator_scroll.set_visible(false);
 
     widgets.handle.set_visible(show_top_bar);
     widgets
@@ -3874,12 +3991,12 @@ fn toolbar_layout_matches(
 
 /// Classic layout: everything back in the top bar, controls at the chosen side.
 fn layout_top_bar_visible(w: &TopBarWidgets, controls_side: app_config::WindowControlsSide) {
-    // dock | settings | new_ws | open_folder | indicator_box | [controls at side]
+    // dock | settings | new_ws | open_folder | [controls at side]
+    // Workspace pills stay off this bar; the sidebar cards are the list.
     w.content.append(&w.dock);
     w.content.append(&w.settings);
     w.content.append(&w.new_ws);
     w.content.append(&w.open_folder);
-    w.content.append(&w.indicator_scroll);
 
     match controls_side {
         app_config::WindowControlsSide::Left => {
@@ -4137,7 +4254,7 @@ fn build_sidebar_row(
         .xalign(0.0)
         .hexpand(true)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .margin_start(8)
+        .margin_start(0)
         .build();
     path_label.add_css_class("limux-ws-path");
     if let Some(p) = folder_path {
@@ -4150,7 +4267,7 @@ fn build_sidebar_row(
     // The git branch on its own line above the path, cmux's default layout.
     let branch_label = gtk::Label::builder()
         .xalign(0.0)
-        .margin_start(8)
+        .margin_start(0)
         .visible(false)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
@@ -4166,7 +4283,7 @@ fn build_sidebar_row(
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .visible(false)
-        .margin_start(8)
+        .margin_start(0)
         .build();
     description_label.add_css_class(workspace_card::DESCRIPTION_CSS_CLASS);
 
@@ -4188,7 +4305,7 @@ fn build_sidebar_row(
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .visible(false)
-        .margin_start(8)
+        .margin_start(0)
         .build();
     notify_label.add_css_class("limux-notify-msg");
 
@@ -4250,7 +4367,7 @@ fn render_workspace_card(workspace: &Workspace) {
         let label = gtk::Label::builder()
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
-            .margin_start(8)
+            .margin_start(0)
             .build();
         label.set_markup(&workspace_card::status_row_markup(entry));
         label.set_tooltip_text(Some(&format!("{}: {}", entry.key, entry.value)));
@@ -9485,9 +9602,9 @@ mod tests {
         }
     }
     use super::{
-        browser_command_requires_existing_target, build_window_css, commit_inline_rename_for_click,
-        desktop_notification_action_from_signal, desktop_notification_actions,
-        desktop_notification_activation_token_from_signal,
+        browser_command_requires_existing_target, build_window_css, chrome_css, CMUX_OVERRIDE_CSS,
+        commit_inline_rename_for_click, desktop_notification_action_from_signal,
+        desktop_notification_actions, desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, find_leaf_pane, font_size_after_delta, ghostty_prefers_dark,
         gtk_system_prefers_dark_from_raw, has_unread, initial_workspace_state,
@@ -9739,7 +9856,21 @@ mod tests {
         assert!(css.contains(".limux-host-entry text"));
         assert!(css.contains(".limux-host-entry text placeholder"));
         assert!(css.contains(".limux-content"));
-        assert!(css.contains("background-color: rgba(23, 23, 23, 0.420);"));
+        assert!(css.contains("background-color: rgba(0, 0, 0, 0.420);"));
+    }
+
+    #[test]
+    fn dark_chrome_matches_cmux_black_and_selection() {
+        assert!(BASE_CSS.contains(crate::workspace_color::SELECTION_FILL));
+        assert!(BASE_CSS.contains(
+            ".limux-ws-name {\n    color: alpha(@window_fg_color, 0.92);\n    font-size: 12px;"
+        ));
+        let chrome = chrome_css();
+        assert!(chrome.contains(crate::workspace_color::CHROME_BLACK));
+        assert!(chrome.contains(".limux-pane-header"));
+        assert!(chrome.contains(".limux-sidebar"));
+        assert!(CMUX_OVERRIDE_CSS.contains("background-color: #3e90f7;"));
+        assert!(CMUX_OVERRIDE_CSS.contains("background-color: #000000;"));
     }
 
     #[test]
