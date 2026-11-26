@@ -98,7 +98,7 @@ Submodule pin on the fork: `9f647e126082f93ba36b0d03f282f3fd5f4a8769` from `matt
 - `b7923ba6` ABI size and loop fix
 - `9f647e12` `ProgramStatus.C` named for Zig 0.16
 
-`.gitmodules` url is `https://github.com/mattmartinez/ghostty.git`. Upstream's release templates still name `bvolpato/ghostty`. Do not revert the url or the pin to take upstream's. Inside `ghostty/`, `origin` is bvolpato and `mattmartinez` is the fork.
+`.gitmodules` url is `https://github.com/mattmartinez/ghostty.git`. The AUR source workflow reads the URL and pin from the same Limux commit; the unused Flatpak manifest still names `bvolpato/ghostty`. Do not revert the url or the pin to take upstream's. Inside `ghostty/`, `origin` is bvolpato and `mattmartinez` is the fork.
 
 The four commits change Ghostty's action ABI. Fork bindings assert `ghostty_action_u` = 48 and `ghostty_action_s` = 56. Upstream's tree, against the old pin, asserts 24 and 32. Taking upstream's sizes will not match this Ghostty. Keep 48/56. Upstream scrollbar asserts (`ghostty_surface_scrollbar_s`, size 32) can be added if that struct is in the bindings; they are not a reason to shrink the action union.
 
