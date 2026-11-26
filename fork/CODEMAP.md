@@ -44,7 +44,7 @@ Chrome (`c54b8a2`, do not restore the old pills):
 
 - Sidebar and window chrome are `#000000` (`workspace_color::CHROME_BLACK`). Selected card fill is `#3e90f7` (`SELECTION_FILL`), not Libadwaita's accent and not the workspace color.
 - A workspace color is a 3px left rail. Selection stays the standard blue.
-- Committed title is 12px, weight 500 (`BASE_CSS` `.limux-ws-name`). Selected card text is `#ffffff`. Path is 11px. `card_css` secondary lines are `0.85em`, `alpha(@window_fg_color, 0.55)`, white when the row is selected.
+- Committed title is 12px, weight 500 (`BASE_CSS` `.limux-ws-name`). Card text is light regardless of system theme because the card background is always dark. Path is 11px; `card_css` secondary lines are `0.85em`.
 - `show_workspace_indicators` defaults to `false`. The settings row "Workspace indicators on the top bar" is gone. Indicator buttons stay hidden. Do not re-show them because upstream toggles `show_workspace_indicators`.
 
 Uncommitted worktree edits, not on `main` and not part of the committed contract: titles `#ffffff` 13px weight 700; secondary lines `#8a8a8a`, `#d0d0d0` when selected. A sync must not revert those if they are still dirty. Do not commit them as part of an upstream merge.
@@ -82,6 +82,8 @@ Hooks (`limux hooks setup`) write a row under the agent's own key: Running on su
 `refresh_workspace_title` in `window.rs`. A workspace nobody named takes the title of the tab it last had focused (tab name, else the terminal title), passed through `workspace_title_from_terminal`: breaks become spaces, other controls and bidi overrides are refused, cut at 256 with an ellipsis, a lone spinner frame is dropped. `named_by_user` blocks that. A session saved before the field existed counts as user-named unless the name is `default_workspace_name(folder_path)` (`workspace_named_by_user`).
 
 The title callback in `pane.rs` (`on_title_changed`) must still call `(callbacks.on_title_changed)`. That is what moves the card. Upstream's dedup (skip when the stored title already equals the display string) is fine. Storing the display form is fine. Dropping the callback, or skipping it on the first change, is not. `LIMUX_DEBUG_TITLES=1` logs the decision.
+
+Automatic title-only changes are safe to ignore when another window edits or deletes a workspace. Keep true session conflicts recoverable. Reading a card notification clears its unread styling, not its message.
 
 ### Path follows the shell
 

@@ -445,12 +445,9 @@ pub(super) fn has_unread(workspace_unread: bool, tab_unread: bool) -> bool {
 }
 
 pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
-    let show_notify_label = unread && !workspace.notify_label.label().is_empty();
-    let visual_state = (unread, show_notify_label);
-    if workspace.unread_visual.get() == Some(visual_state) {
+    if workspace.unread_visual.replace(Some(unread)) == Some(unread) {
         return;
     }
-    workspace.unread_visual.set(Some(visual_state));
 
     if unread {
         workspace
@@ -461,7 +458,6 @@ pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
         workspace
             .notify_label
             .add_css_class("limux-notify-msg-unread");
-        workspace.notify_label.set_visible(show_notify_label);
         if let Some(row_box) = workspace.sidebar_row.child() {
             row_box.add_css_class("limux-sidebar-row-unread");
         }
@@ -484,8 +480,6 @@ pub(super) fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
             .notify_label
             .remove_css_class("limux-notify-msg-unread");
         workspace.notify_label.add_css_class("limux-notify-msg");
-        workspace.notify_label.set_visible(false);
-        workspace.notify_label.set_label("");
         if let Some(row_box) = workspace.sidebar_row.child() {
             row_box.remove_css_class("limux-sidebar-row-unread");
         }
@@ -646,6 +640,7 @@ pub(super) fn mark_workspace_unread_with_message(
             {
                 workspace.unread |= mark_workspace_level;
                 workspace.notify_label.set_label(message);
+                workspace.notify_label.set_visible(!message.is_empty());
             }
             drop(s);
             sync_workspace_unread(state, ws_id);

@@ -327,6 +327,11 @@ limux refresh-pr
   `pause.circle.fill`, `bell.fill`, `checkmark`, `arrow.triangle.pull`, ...) or
   up to four characters, and `--color` takes `#rrggbb` or a name.
 - **The description** is saved with the session.
+- **The latest background notification** stays on the card after it is read;
+  only the unread highlight clears. The message is not saved across restarts.
+- **Session merging.** Automatic title changes do not conflict with edits in
+  another window. If both windows make incompatible edits, Limux leaves the
+  shared session intact and keeps a recovery file for the other window.
 - **The git branch** of the workspace's current directory is shown on its own
   line above its path, read from `.git/HEAD` (worktrees included) without
   running git. A pull request row comes after the path.

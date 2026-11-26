@@ -81,13 +81,23 @@ pub(super) fn session_conflict_detail(recovery: &Path, workspaces: &[String]) ->
     format!("Another Limux window changed the same workspace(s): {}. The shared session was not overwritten. This window's complete session was saved to {}.", workspaces.join(", "), recovery.display())
 }
 
-pub(super) fn report_session_save_notice(state: &State, detail: String) {
-    if state.borrow().session_save_notice.as_ref() == Some(&detail) {
+#[derive(PartialEq, Eq)]
+pub(super) enum SessionSaveNotice {
+    Conflict,
+    Error(String),
+}
+
+fn report_session_save_notice(state: &State, notice: SessionSaveNotice, detail: &str) {
+    // The recovery file is refreshed on every conflicting save. Workspace
+    // names in its message can change without this being a new conflict.
+    let mut s = state.borrow_mut();
+    if s.session_save_notice.as_ref() == Some(&notice) {
         return;
     }
-    state.borrow_mut().session_save_notice = Some(detail.clone());
+    s.session_save_notice = Some(notice);
+    drop(s);
     eprintln!("limux: {detail}");
-    show_runtime_error(state, "Session could not be merged", &detail);
+    show_runtime_error(state, "Session could not be merged", detail);
 }
 
 pub(super) fn save_session_for_rpc(
@@ -273,9 +283,16 @@ pub(super) fn finish_session_save(
             recovery,
             workspaces,
         }) => {
-            report_session_save_notice(state, session_conflict_detail(&recovery, &workspaces));
+            report_session_save_notice(
+                state,
+                SessionSaveNotice::Conflict,
+                &session_conflict_detail(&recovery, &workspaces),
+            );
         }
-        Err(error) => report_session_save_notice(state, format!("Failed to save session: {error}")),
+        Err(error) => {
+            let detail = format!("Failed to save session: {error}");
+            report_session_save_notice(state, SessionSaveNotice::Error(error), &detail);
+        }
     }
 }
 

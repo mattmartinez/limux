@@ -425,7 +425,7 @@ pub fn card_css() -> &'static str {
      .limux-ws-status-row,\n\
      .limux-ws-branch {\n\
          font-size: 0.85em;\n\
-         color: alpha(@window_fg_color, 0.55);\n\
+         color: alpha(white, 0.60);\n\
      }\n\
      .limux-ws-branch { margin-right: 6px; }\n\
      .limux-sidebar-list row:selected .limux-ws-description,\n\

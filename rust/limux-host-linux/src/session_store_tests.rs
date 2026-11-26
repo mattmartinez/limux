@@ -350,6 +350,36 @@ fn stale_edit_after_observing_remote_edit_still_conflicts() {
 }
 
 #[test]
+fn automatic_titles_do_not_conflict_with_workspace_edits_or_deletions() {
+    let dir = tempdir().unwrap();
+    let mut base = initial(dir.path());
+    for workspace in &mut base.workspaces {
+        workspace.named_by_user = Some(false);
+    }
+    layout_state::save_session_atomic_in(dir.path(), &base).unwrap();
+    let (mut titles, _) = SessionStore::load_from_dir(dir.path()).unwrap();
+    let (mut edits, _) = SessionStore::load_from_dir(dir.path()).unwrap();
+    let mut live = base.clone();
+    live.workspaces[0].name = "agent working".into();
+    saved(&mut titles, &live);
+    assert_eq!(disk(dir.path()).workspaces[0].name, "agent working");
+
+    let mut edited = base;
+    edited.workspaces[0].description = Some("keep this description".into());
+    edited.workspaces.remove(1);
+    saved(&mut edits, &edited);
+    live.workspaces[0].name = "agent done".into();
+    live.workspaces[1].name = "title from stale window".into();
+    saved(&mut titles, &live);
+    assert_eq!(disk(dir.path()), edited);
+
+    live.workspaces[0].name = "explicit rename".into();
+    live.workspaces[0].named_by_user = Some(true);
+    assert!(matches!(titles.save(&live).unwrap(), SaveOutcome::Conflict { .. }));
+    assert_eq!(disk(dir.path()), edited);
+}
+
+#[test]
 fn concurrent_delete_and_edit_conflict_in_both_directions() {
     for delete_first in [false, true] {
         let dir = tempdir().unwrap();

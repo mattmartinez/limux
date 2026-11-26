@@ -75,8 +75,8 @@ struct Workspace {
     unread: bool,
     /// True when the user explicitly marked this workspace unread via the context menu.
     manual_unread: bool,
-    /// Cached `(unread, notify_label_visible)` applied to sidebar and top-bar widgets.
-    unread_visual: Cell<Option<(bool, bool)>>,
+    /// Cached unread styling for the sidebar and top-bar widgets.
+    unread_visual: Cell<Option<bool>>,
     /// Background colour of the sidebar row, if the user picked one.
     color: Option<WorkspaceColor>,
     /// Last known working directory from the terminal (via OSC 7).
@@ -158,7 +158,7 @@ pub(crate) struct AppState {
     session_save_timer: Option<glib::SourceId>,
     session_store: Result<Option<crate::session_store::SessionStore>, String>,
     session_save_waiters: Vec<std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>>,
-    session_save_notice: Option<String>,
+    session_save_notice: Option<session_persistence::SessionSaveNotice>,
     session_close_dialog_open: bool,
     session_close_pending: Option<SessionCloseMode>,
     close_after_recovery: bool,
@@ -1536,7 +1536,7 @@ const BASE_CSS: &str = r#"
     box-shadow: none;
 }
 .limux-ws-name {
-    color: alpha(@window_fg_color, 0.92);
+    color: alpha(white, 0.92);
     font-size: 12px;
     font-weight: 500;
 }
@@ -1613,7 +1613,7 @@ const BASE_CSS: &str = r#"
     min-width: 0;
 }
 .limux-notify-msg {
-    color: alpha(@window_fg_color, 0.55);
+    color: alpha(white, 0.60);
     font-size: 11px;
 }
 .limux-notify-msg-unread {
@@ -1634,7 +1634,7 @@ const BASE_CSS: &str = r#"
     box-shadow: none;
 }
 .limux-sidebar-row-unread .limux-ws-name {
-    color: @window_fg_color;
+    color: white;
     font-weight: 600;
 }
 .limux-drop-above .limux-sidebar-row-box {
@@ -1688,7 +1688,7 @@ const BASE_CSS: &str = r#"
     border-color: alpha(@accent_bg_color, 0.9);
 }
 .limux-ws-path {
-    color: alpha(@window_fg_color, 0.55);
+    color: alpha(white, 0.60);
     font-size: 11px;
 }
 .limux-sidebar-list row:selected .limux-ws-path {
@@ -10194,9 +10194,6 @@ mod tests {
     #[test]
     fn dark_chrome_matches_cmux_black_and_selection() {
         assert!(BASE_CSS.contains(crate::workspace_color::SELECTION_FILL));
-        assert!(BASE_CSS.contains(
-            ".limux-ws-name {\n    color: alpha(@window_fg_color, 0.92);\n    font-size: 12px;"
-        ));
         let chrome = chrome_css();
         assert!(chrome.contains(crate::workspace_color::CHROME_BLACK));
         assert!(chrome.contains(".limux-pane-header"));

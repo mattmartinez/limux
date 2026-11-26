@@ -349,6 +349,41 @@ fn selected_id(state: &AppSessionState) -> Option<&str> {
         .and_then(|workspace| workspace.id.as_deref())
 }
 
+/// A terminal-controlled display title is not a competing workspace edit.
+fn only_automatic_title_changed(
+    before: Option<&WorkspaceState>,
+    after: Option<&WorkspaceState>,
+) -> bool {
+    let (Some(before), Some(after)) = (before, after) else {
+        return false;
+    };
+    let WorkspaceState {
+        id,
+        name,
+        named_by_user,
+        favorite,
+        cwd,
+        folder_path,
+        autostart_command,
+        color,
+        description,
+        group_id,
+        layout,
+    } = before;
+    *named_by_user == Some(false)
+        && *named_by_user == after.named_by_user
+        && *name != after.name
+        && *id == after.id
+        && *favorite == after.favorite
+        && *cwd == after.cwd
+        && *folder_path == after.folder_path
+        && *autostart_command == after.autostart_command
+        && *color == after.color
+        && *description == after.description
+        && *group_id == after.group_id
+        && *layout == after.layout
+}
+
 fn merge_session(
     previous_local: &AppSessionState,
     previous_disk: &AppSessionState,
@@ -378,7 +413,10 @@ fn merge_session(
         let theirs = current_disk.get(id).copied();
         let changed = ours != before || (first_save && ours.is_some() && ancestor.is_none());
         let normalize_own = first_save && ours.is_some() && theirs == ancestor;
-        let chosen = if ours == theirs || ((changed || normalize_own) && theirs == ancestor) {
+        let uncontested = ours == theirs || ((changed || normalize_own) && theirs == ancestor);
+        let keep_disk = !uncontested && (!changed || only_automatic_title_changed(before, ours));
+        let chosen = if uncontested || (!keep_disk && only_automatic_title_changed(ancestor, theirs))
+        {
             accepted.insert(id.to_string());
             match ours {
                 Some(workspace) => {
@@ -389,7 +427,7 @@ fn merge_session(
                 }
             }
             ours
-        } else if !changed {
+        } else if keep_disk {
             // Do not advance ancestry to a remote edit that this UI never saw.
             theirs
         } else {
