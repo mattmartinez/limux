@@ -375,7 +375,10 @@ fn automatic_titles_do_not_conflict_with_workspace_edits_or_deletions() {
 
     live.workspaces[0].name = "explicit rename".into();
     live.workspaces[0].named_by_user = Some(true);
-    assert!(matches!(titles.save(&live).unwrap(), SaveOutcome::Conflict { .. }));
+    assert!(matches!(
+        titles.save(&live).unwrap(),
+        SaveOutcome::Conflict { .. }
+    ));
     assert_eq!(disk(dir.path()), edited);
 }
 

@@ -415,8 +415,8 @@ fn merge_session(
         let normalize_own = first_save && ours.is_some() && theirs == ancestor;
         let uncontested = ours == theirs || ((changed || normalize_own) && theirs == ancestor);
         let keep_disk = !uncontested && (!changed || only_automatic_title_changed(before, ours));
-        let chosen = if uncontested || (!keep_disk && only_automatic_title_changed(ancestor, theirs))
-        {
+        let disk_title_only = || only_automatic_title_changed(ancestor, theirs);
+        let chosen = if uncontested || (!keep_disk && disk_title_only()) {
             accepted.insert(id.to_string());
             match ours {
                 Some(workspace) => {

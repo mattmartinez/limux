@@ -1102,9 +1102,11 @@ fn a_quick_failure_in_a_late_started_terminal_is_held() {
         &state,
         &WorkspaceState {
             color: None,
+            description: None,
             group_id: None,
             id: None,
             name: "late".to_string(),
+            named_by_user: None,
             favorite: false,
             cwd: None,
             folder_path: None,

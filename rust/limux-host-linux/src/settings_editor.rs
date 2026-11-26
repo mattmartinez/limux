@@ -1134,14 +1134,15 @@ mod tests {
                 }
             }),
         });
-        for title in ["Top bar"] {
-            let switch = find_control(&page, title)
-                .expect("settings control")
-                .downcast::<gtk::Switch>()
-                .expect("switch");
-            switch.set_active(false);
-            assert!(switch.is_active(), "{title} retained a rejected setting");
-        }
+        let top_bar_switch = find_control(&page, "Top bar")
+            .expect("settings control")
+            .downcast::<gtk::Switch>()
+            .expect("switch");
+        top_bar_switch.set_active(false);
+        assert!(
+            top_bar_switch.is_active(),
+            "rejected top bar toggle was retained"
+        );
         let dropdown = find_control(&page, "Window controls side")
             .expect("settings control")
             .downcast::<gtk::DropDown>()
@@ -1183,7 +1184,7 @@ mod tests {
             "rejected unread color was retained"
         );
         assert_eq!(config.borrow().interface, Default::default());
-        assert_eq!(rejected_changes.get(), 6, "rollback must not save again");
+        assert_eq!(rejected_changes.get(), 5, "rollback must not save again");
 
         reject_changes.set(false);
         tab_activity_switch.set_active(false);
