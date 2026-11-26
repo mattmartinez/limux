@@ -4,7 +4,7 @@
 //!
 //! All on one line. Tabs left-justified, icons right-justified.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -361,6 +361,10 @@ impl TerminalShortcutTarget {
         self.handle.hide_find()
     }
 
+    pub fn is_find_active(&self) -> bool {
+        self.handle.is_find_active()
+    }
+
     pub fn use_selection_for_find(&self) -> bool {
         self.handle.use_selection_for_find()
     }
@@ -699,6 +703,7 @@ pub fn create_pane(
     let pane_id = pane_id_for_initial_state(initial_state);
     let internals = Rc::new(PaneInternals {
         pane_id,
+        empty_tab_id: OnceCell::new(),
         tab_state: tab_state.clone(),
         tab_strip: tab_strip.clone(),
         content_stack: content_stack.clone(),
@@ -855,6 +860,30 @@ pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
         &internals.callbacks,
     );
     true
+}
+
+/// Focus the pane's active tab at once: a key typed right after a move between
+/// panes must not reach the pane left behind.
+pub fn grab_active_tab_focus(pane_widget: &gtk::Widget) {
+    if let Some(internals) = find_pane_internals(pane_widget) {
+        focus_active_tab_content(&internals.tab_state);
+    }
+}
+
+fn focus_active_tab_content(tab_state: &Rc<RefCell<TabState>>) {
+    let target = {
+        let state = tab_state.borrow();
+        state
+            .tabs
+            .iter()
+            .find(|entry| Some(entry.id.as_str()) == state.active_tab.as_deref())
+            // Content on its way from another pane gets focus when it arrives.
+            .filter(|entry| entry.content.is_mapped())
+            .map(TabFocusTarget::from_entry)
+    };
+    if let Some(target) = target {
+        target.focus();
+    }
 }
 
 /// A pane's unread tabs, for jumping between unread terminals.
@@ -1017,6 +1046,23 @@ pub fn mark_tab_read_in_pane(pane_widget: &gtk::Widget, tab_id: &str) {
     };
     if clear_tab_unread(&internals.tab_state, tab_id) {
         (internals.callbacks.on_unread_changed)();
+    }
+}
+
+/// Mark the active tab read for a user whose focus entered its pane. A tab
+/// marked unread by hand stays unread.
+pub fn read_active_tab_in_pane(pane_widget: &gtk::Widget) {
+    let Some(internals) = find_pane_internals(pane_widget) else {
+        return;
+    };
+    let active_tab = internals.tab_state.borrow().active_tab.clone();
+    if let Some(tab_id) = active_tab {
+        clear_tab_unread_if_visible_and_not_manual(
+            &internals.tab_state,
+            &tab_id,
+            pane_widget,
+            &internals.callbacks,
+        );
     }
 }
 
@@ -1525,6 +1571,9 @@ struct TabState {
 /// Shared internals stored on the pane outer Box for external access.
 pub struct PaneInternals {
     pane_id: u32,
+    /// Id of the terminal saved for this pane while it is kept open without
+    /// tabs. It never changes, so the saved session does not either.
+    empty_tab_id: OnceCell<String>,
     tab_state: Rc<std::cell::RefCell<TabState>>,
     tab_strip: gtk::Box,
     content_stack: gtk::Stack,
@@ -2557,7 +2606,9 @@ fn add_terminal_tab_inner(
             &internals.tab_state,
             &tab_id,
         );
-        term.handle.focus_surface();
+        if internals.content_stack.is_mapped() {
+            term.handle.focus_surface();
+        }
     }
     if options.is_none() {
         (internals.callbacks.on_state_changed)();
@@ -2724,7 +2775,7 @@ fn is_safe_shell_bareword(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     if is_safe_shell_bareword(value) {
         value.to_string()
     } else {
@@ -2989,14 +3040,16 @@ pub fn add_keybind_editor_tab_to_pane(
     on_capture: Rc<PaneShortcutCaptureCallback>,
 ) {
     if let Some(internals) = find_pane_internals(pane_widget) {
-        if let Some(existing_id) = internals
+        // Its own statement: an `if let` would keep the tab state borrowed
+        // while `activate_tab` changes it.
+        let existing_id = internals
             .tab_state
             .borrow()
             .tabs
             .iter()
             .find(|entry| matches!(entry.kind, TabKind::Keybinds))
-            .map(|entry| entry.id.clone())
-        {
+            .map(|entry| entry.id.clone());
+        if let Some(existing_id) = existing_id {
             activate_tab(
                 &internals.tab_strip,
                 &internals.content_stack,
@@ -3057,6 +3110,14 @@ pub fn refresh_shortcut_tooltips(pane_widget: &gtk::Widget, shortcuts: &Resolved
 pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
     let internals = find_pane_internals(pane_widget)?;
     let ts = internals.tab_state.borrow();
+    if ts.tabs.is_empty() {
+        let id = internals.empty_tab_id.get_or_init(new_tab_id);
+        return Some(PaneState {
+            pane_id: Some(internals.pane_id),
+            active_tab_id: Some(id.clone()),
+            tabs: vec![SavedTabState::terminal(id, None)],
+        });
+    }
     let tabs = ts
         .tabs
         .iter()
@@ -3774,8 +3835,13 @@ fn activate_tab_with_focus(
         // Mouse-initiated tab switches can leave focus on the click target if we
         // refocus synchronously. Deferring to the next idle tick makes the newly
         // active surface or webview the final focus owner.
+        let content_stack = content_stack.clone();
         glib::idle_add_local_once(move || {
-            target.focus();
+            // GTK would also focus a tab nobody can see, in a hidden workspace
+            // or behind a zoomed pane.
+            if content_stack.is_mapped() {
+                target.focus();
+            }
         });
     }
 }
@@ -3790,6 +3856,10 @@ fn remove_tab(
     empty_reason: PaneEmptyReason,
 ) {
     commit_active_tab_rename(tab_state);
+
+    // A tab that closes in a pane the user is not in must not take the keyboard.
+    let takes_focus = crate::terminal::focus_is_within(pane_outer.upcast_ref())
+        || pane_outer.root().is_some_and(|root| root.focus().is_none());
 
     let (entry, removed_was_unread, closed_terminal, new_id, was_active) = {
         let mut ts = tab_state.borrow_mut();
@@ -3839,7 +3909,7 @@ fn remove_tab(
         // maps its first child the instant the visible one is hidden, so
         // detaching after activation keeps that first child from flashing on
         // screen (see `terminal::detach_after_repaint`).
-        activate_tab(tab_strip, content_stack, tab_state, &new_id);
+        activate_tab_with_focus(tab_strip, content_stack, tab_state, &new_id, takes_focus);
         clear_tab_unread_if_visible(tab_state, &new_id, &pane_outer.clone().upcast(), callbacks);
     }
     crate::terminal::remove_from_stack_after_repaint(&entry.content);
@@ -5012,33 +5082,62 @@ fn build_live_browser_widget(
 fn unavailable_browser_widget(error: &str) -> (gtk::Widget, String, BrowserHandles) {
     let placeholder = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
         .hexpand(true)
         .vexpand(true)
         .focusable(true)
         .build();
-    let title = gtk::Label::new(Some("Browser unavailable"));
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .spacing(12)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(24)
+        .margin_end(24)
+        .build();
+    let title = gtk::Label::builder()
+        .label("Browser unavailable")
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .build();
     title.add_css_class("title-3");
     let guidance = gtk::Label::builder()
         .label("WebKit could not start its sandbox. Check this installation's user-namespace policy and sandbox helpers, then restart Limux.")
         .wrap(true)
+        .justify(gtk::Justification::Center)
         .max_width_chars(75)
         .build();
     let explanation = gtk::Label::builder()
         .label(error)
         .wrap(true)
+        // A path has no spaces to break at.
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
         .selectable(true)
         .max_width_chars(75)
+        .margin_top(6)
         .build();
     let details = gtk::Expander::new(Some("Technical details"));
+    details.set_halign(gtk::Align::Center);
     details.set_child(Some(&explanation));
-    let saved = gtk::Label::new(Some(
-        "Your browser tab is saved. Terminals remain available.",
-    ));
-    placeholder.append(&title);
-    placeholder.append(&guidance);
-    placeholder.append(&saved);
-    placeholder.append(&details);
+    let saved = gtk::Label::builder()
+        .label("Your browser tab is saved. Terminals remain available.")
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .build();
+    content.append(&title);
+    content.append(&guidance);
+    content.append(&saved);
+    content.append(&details);
+    // The details can be taller than the pane.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hexpand(true)
+        .vexpand(true)
+        .child(&content)
+        .build();
+    placeholder.append(&scroller);
     let widget = placeholder.upcast::<gtk::Widget>();
     (
         widget.clone(),
@@ -5049,29 +5148,44 @@ fn unavailable_browser_widget(error: &str) -> (gtk::Widget, String, BrowserHandl
 
 #[cfg(any(feature = "webkit", test))]
 fn normalize_browser_entry_input(input: &str) -> String {
-    if input.starts_with("http://") || input.starts_with("https://") {
+    let input = input.trim();
+    if link_uri::is_typed_browser_url(input) {
         return input.to_string();
     }
-
-    if is_localhost_input(input) {
-        format!("http://{input}")
-    } else if input.contains('.') {
-        format!("https://{input}")
-    } else {
-        format!(
-            "https://www.google.com/search?q={}",
-            input.replace(' ', "+")
-        )
+    if let Some(scheme) = browser_entry_host_scheme(input) {
+        return format!("{scheme}://{input}");
     }
+    let query = glib::Uri::escape_string(input, Some(" "), false).replace(' ', "+");
+    format!("https://www.google.com/search?q={query}")
 }
 
+/// The scheme to open address-bar input with, or `None` when it names no host
+/// and is a search.
 #[cfg(any(feature = "webkit", test))]
-fn is_localhost_input(input: &str) -> bool {
-    input == "localhost"
-        || input
-            .strip_prefix("localhost")
-            .and_then(|rest| rest.chars().next())
-            .is_some_and(|ch| matches!(ch, ':' | '/' | '?' | '#'))
+fn browser_entry_host_scheme(input: &str) -> Option<&'static str> {
+    if input.contains(char::is_whitespace) {
+        return None;
+    }
+    let uri = glib::Uri::parse(&format!("http://{input}"), glib::UriFlags::PARSE_RELAXED).ok()?;
+    if uri.userinfo().is_some() {
+        return None;
+    }
+    let host = uri.host().filter(|host| !host.is_empty())?;
+    let has_valid_dotted_host = host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && !host.contains("..");
+    // As in other browsers, only public names default to https. One word
+    // without a port stays a search.
+    let single_label_with_port = uri.port() != -1
+        && !host.contains('.')
+        && host.starts_with(|ch: char| ch.is_ascii_alphabetic());
+    let is_localhost = host.eq_ignore_ascii_case("localhost")
+        || (has_valid_dotted_host && host.to_ascii_lowercase().ends_with(".localhost"));
+    if is_localhost || host.parse::<std::net::IpAddr>().is_ok() || single_label_with_port {
+        return Some("http");
+    }
+    has_valid_dotted_host.then_some("https")
 }
 
 #[cfg(not(feature = "webkit"))]
@@ -5113,7 +5227,7 @@ fn create_browser_widget(
 mod tests {
     use super::{
         classify_content_drop_zone, content_drop_preview_rect, display_terminal_title,
-        effective_drop_target_dimensions, is_localhost_input, is_usable_autostart_runtime_dir,
+        effective_drop_target_dimensions, is_usable_autostart_runtime_dir,
         next_active_after_tab_removal, normalize_browser_entry_input,
         normalize_reorder_insert_index, pane_action_tooltip, resolve_surface_hint,
         resolved_link_destination, select_terminal_commands, select_terminal_tab,
@@ -5605,36 +5719,16 @@ mod tests {
     }
 
     #[test]
-    fn localhost_inputs_only_match_real_localhost_hosts() {
-        for input in [
-            "localhost",
-            "localhost:3000",
-            "localhost/path",
-            "localhost?q=1",
-        ] {
-            assert!(is_localhost_input(input), "{input} should be localhost");
-        }
-
-        for input in [
-            "localhost.run",
-            "localhost.example.com",
-            "localhost docs",
-            "mylocalhost:3000",
-        ] {
-            assert!(
-                !is_localhost_input(input),
-                "{input} should not be treated as localhost"
-            );
-        }
-    }
-
-    #[test]
     fn normalize_browser_entry_input_preserves_search_and_domain_behavior() {
         let cases = [
             ("https://example.com", "https://example.com"),
             ("localhost", "http://localhost"),
             ("localhost:3000", "http://localhost:3000"),
             ("localhost/path", "http://localhost/path"),
+            ("localhost?q=1", "http://localhost?q=1"),
+            ("LOCALHOST:3000", "http://LOCALHOST:3000"),
+            ("sub.localhost:3000", "http://sub.localhost:3000"),
+            ("SUB.LOCALHOST:3000", "http://SUB.LOCALHOST:3000"),
             ("localhost.run", "https://localhost.run"),
             ("localhost.example.com", "https://localhost.example.com"),
             (
@@ -5646,6 +5740,76 @@ mod tests {
                 "example search",
                 "https://www.google.com/search?q=example+search",
             ),
+            // Plain hosts and addresses, where development servers run.
+            ("127.0.0.1:3000", "http://127.0.0.1:3000"),
+            ("192.168.1.10:8000/x", "http://192.168.1.10:8000/x"),
+            ("[::1]:3000", "http://[::1]:3000"),
+            ("devbox:3000/path", "http://devbox:3000/path"),
+            ("example.com:8443", "https://example.com:8443"),
+            (
+                "example.com/?to=http://a.test",
+                "https://example.com/?to=http://a.test",
+            ),
+            // A scheme the user typed stays.
+            ("HTTPS://example.com", "HTTPS://example.com"),
+            (" https://example.com ", "https://example.com"),
+            ("file:///home/me/index.html", "file:///home/me/index.html"),
+            (
+                "file:///home/me/my file.html",
+                "file:///home/me/my file.html",
+            ),
+            ("about:blank", "about:blank"),
+            // Searches keep every character.
+            (
+                "node.js tutorial",
+                "https://www.google.com/search?q=node.js+tutorial",
+            ),
+            (
+                "C# & C++ 100%",
+                "https://www.google.com/search?q=C%23+%26+C%2B%2B+100%25",
+            ),
+            ("caf\u{e9}", "https://www.google.com/search?q=caf%C3%A9"),
+            ("devbox", "https://www.google.com/search?q=devbox"),
+            ("std::vec", "https://www.google.com/search?q=std%3A%3Avec"),
+            (
+                "site:example.com",
+                "https://www.google.com/search?q=site%3Aexample.com",
+            ),
+            // Non-host paths, queries, unsupported schemes, userinfo, and malformed URLs stay searches.
+            ("src/main.rs", "https://www.google.com/search?q=src%2Fmain.rs"),
+            ("word?a=1.2", "https://www.google.com/search?q=word%3Fa%3D1.2"),
+            (
+                "ftp://ftp.example.com/file",
+                "https://www.google.com/search?q=ftp%3A%2F%2Fftp.example.com%2Ffile",
+            ),
+            (
+                "mailto:user@example.com",
+                "https://www.google.com/search?q=mailto%3Auser%40example.com",
+            ),
+            (
+                "user@example.com",
+                "https://www.google.com/search?q=user%40example.com",
+            ),
+            (
+                "javascript:alert(1)",
+                "https://www.google.com/search?q=javascript%3Aalert%281%29",
+            ),
+            (
+                "javascript://example.com/%0aalert(1)",
+                "https://www.google.com/search?q=javascript%3A%2F%2Fexample.com%2F%250aalert%281%29",
+            ),
+            (
+                "http://example.com foo",
+                "https://www.google.com/search?q=http%3A%2F%2Fexample.com+foo",
+            ),
+            ("http://", "https://www.google.com/search?q=http%3A%2F%2F"),
+            ("https://", "https://www.google.com/search?q=https%3A%2F%2F"),
+            ("about:", "https://www.google.com/search?q=about%3A"),
+            ("file://", "https://www.google.com/search?q=file%3A%2F%2F"),
+            (".env", "https://www.google.com/search?q=.env"),
+            ("..", "https://www.google.com/search?q=.."),
+            ("foo.", "https://www.google.com/search?q=foo."),
+            (".localhost", "https://www.google.com/search?q=.localhost"),
         ];
 
         for (input, expected) in cases {

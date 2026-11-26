@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/aur-publish.yml
+      - .gitmodules
       - .cargo/config.toml
       - Cargo.lock
       - Cargo.toml
@@ -107,6 +108,7 @@ jobs:
             echo "::error::Unable to resolve Ghostty gitlink from $source_commit"
             exit 1
           fi
+          ghostty_repository=$(git config --blob "$source_commit:.gitmodules" --get submodule.ghostty.url)
 
           mkdir -p /tmp/aur-pkgbuilds
           ./scripts/render-aur-source-pkgbuild.sh \
@@ -115,6 +117,7 @@ jobs:
             "$version" \
             "$source_repository" \
             "$source_commit" \
+            "$ghostty_repository" \
             "$ghostty_commit"
 
           if [ "$publish" = true ]; then

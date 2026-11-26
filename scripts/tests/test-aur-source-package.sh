@@ -6,6 +6,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 SOURCE_COMMIT="0123456789abcdef0123456789abcdef01234567"
+GHOSTTY_REPOSITORY="https://github.com/example/ghostty-fork.git"
 GHOSTTY_COMMIT="89abcdef0123456789abcdef0123456789abcdef"
 OUTPUT="$TMP_DIR/PKGBUILD"
 
@@ -15,6 +16,7 @@ OUTPUT="$TMP_DIR/PKGBUILD"
     "1.2.3" \
     "https://github.com/example/limux.git" \
     "$SOURCE_COMMIT" \
+    "$GHOSTTY_REPOSITORY" \
     "$GHOSTTY_COMMIT"
 
 bash -n "$OUTPUT"
@@ -43,7 +45,7 @@ expected=$(printf '%s\n' \
     "libepoxy" \
     "rust" \
     "limux-1.2.3::git+https://github.com/example/limux.git#commit=$SOURCE_COMMIT" \
-    "ghostty-1.2.3::git+https://github.com/bvolpato/ghostty.git#commit=$GHOSTTY_COMMIT" \
+    "ghostty-1.2.3::git+$GHOSTTY_REPOSITORY#commit=$GHOSTTY_COMMIT" \
     "SKIP" \
     "SKIP" \
     "zig-x86_64-linux-0.16.0.tar.xz::https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz" \
@@ -143,6 +145,7 @@ if "$ROOT_DIR/scripts/render-aur-source-pkgbuild.sh" \
     "not-a-version" \
     "https://github.com/example/limux.git" \
     "$SOURCE_COMMIT" \
+    "$GHOSTTY_REPOSITORY" \
     "$GHOSTTY_COMMIT" >/dev/null 2>&1; then
     echo "ERROR: invalid version was accepted" >&2
     exit 1

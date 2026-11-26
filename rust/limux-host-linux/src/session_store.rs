@@ -151,12 +151,16 @@ impl SessionStore {
         local: AppSessionState,
     ) -> gtk4::gio::JoinHandle<(Self, AppSessionState, io::Result<SaveOutcome>)> {
         gtk4::gio::spawn_blocking(move || {
-            let mut persisted = local.clone();
-            let agents = layout_state::RestorableAgentIndex::load();
-            layout_state::attach_restorable_agents_to_session(&mut persisted, &agents);
-            let result = self.save(&persisted);
+            let result = self.save_with_agents(&local);
             (self, local, result)
         })
+    }
+
+    pub(crate) fn save_with_agents(&mut self, local: &AppSessionState) -> io::Result<SaveOutcome> {
+        let mut persisted = local.clone();
+        let agents = layout_state::RestorableAgentIndex::load();
+        layout_state::attach_restorable_agents_to_session(&mut persisted, &agents);
+        self.save(&persisted)
     }
 
     pub(crate) fn save(&mut self, local: &AppSessionState) -> io::Result<SaveOutcome> {
@@ -302,6 +306,24 @@ fn workspace_order(state: &AppSessionState) -> Vec<String> {
         .iter()
         .filter_map(|workspace| workspace.id.clone())
         .collect()
+}
+
+/// `disk` order plus the workspaces only `local` has: each goes before the
+/// workspace that follows it in `local`. One with none after it is left out.
+fn place_local_additions(disk: &AppSessionState, local: &AppSessionState) -> Vec<String> {
+    let mut order = workspace_order(disk);
+    let mut next = None;
+    for id in workspace_order(local).into_iter().rev() {
+        match order.iter().position(|placed| *placed == id) {
+            Some(index) => next = Some(index),
+            None => {
+                if let Some(index) = next {
+                    order.insert(index, id);
+                }
+            }
+        }
+    }
+    order
 }
 
 /// Merge groups by id: a group this window created, edited or deleted since
@@ -461,16 +483,14 @@ fn merge_session(
             .collect::<Vec<_>>()
     };
     let local_reordered = relative(local) != relative(previous_local);
-    if local_reordered
-        && relative(disk) != relative(previous_disk)
-        && relative(local) != relative(disk)
-    {
+    let remote_reordered = relative(disk) != relative(previous_disk);
+    if local_reordered && remote_reordered && relative(local) != relative(disk) {
         return Err(vec!["workspace order".to_string()]);
     }
     let mut order = if local_reordered {
         workspace_order(local)
     } else {
-        workspace_order(disk)
+        place_local_additions(disk, local)
     };
     order.extend(if local_reordered {
         workspace_order(disk)
@@ -540,8 +560,9 @@ fn merge_session(
             ancestry.insert(id, workspace);
         }
     }
-    let mut ancestry_order = if local_reordered {
-        workspace_order(local)
+    // The saved order is ours, unless another window reordered it unseen.
+    let mut ancestry_order = if local_reordered || !remote_reordered {
+        workspace_order(&result)
     } else {
         workspace_order(previous_disk)
     };

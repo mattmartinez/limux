@@ -160,7 +160,7 @@ pub(crate) struct AppState {
     session_save_waiters: Vec<std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>>,
     session_save_notice: Option<session_persistence::SessionSaveNotice>,
     session_close_dialog_open: bool,
-    session_close_pending: Option<SessionCloseMode>,
+    session_close_pending: Option<PendingSessionClose>,
     close_after_recovery: bool,
     workspace_dragging: Option<String>,
     group_dragging: Option<String>,
@@ -171,6 +171,7 @@ pub(crate) struct AppState {
     _theme_portal_signal: Option<gio::SignalSubscription>,
     _theme_gnome_settings: Option<gio::Settings>,
     _theme_gnome_signal: Option<glib::SignalHandlerId>,
+    omarchy_theme_watcher: Option<crate::omarchy_theme::OmarchyThemeWatcher>,
     _desktop_notification_token_signal: Option<gio::SignalSubscription>,
     _desktop_notification_action_signal: Option<gio::SignalSubscription>,
     _desktop_notification_closed_signal: Option<gio::SignalSubscription>,
@@ -342,6 +343,26 @@ fn workspace_index_for_target(state: &AppState, target: &WorkspaceTarget) -> Opt
             .position(|workspace| workspace.name == *name),
         WorkspaceTarget::Index(index) => (*index < state.workspaces.len()).then_some(*index),
     }
+}
+
+/// The error for a name that several workspaces share: picking one could send
+/// input to the wrong terminal.
+fn ambiguous_workspace_name(state: &AppState, target: &WorkspaceTarget) -> Option<BridgeError> {
+    let WorkspaceTarget::Name(name) = target else {
+        return None;
+    };
+    let ids: Vec<&str> = state
+        .workspaces
+        .iter()
+        .filter(|workspace| workspace.name == *name)
+        .map(|workspace| workspace.id.as_str())
+        .collect();
+    (ids.len() > 1).then(|| {
+        BridgeError::invalid_params(format!(
+            "several workspaces are named {name:?}; use the workspace id: {}",
+            ids.join(", ")
+        ))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -766,6 +787,12 @@ fn control_terminal_target(
         }),
         handle,
     ))
+}
+
+/// Input for a terminal that is still not running must fail: nothing would
+/// deliver it later.
+fn terminal_not_started() -> BridgeError {
+    BridgeError::conflict("terminal has not started yet")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1833,15 +1860,32 @@ fn app_css(background_opacity: f64, config: &app_config::AppConfig) -> String {
     } else {
         ""
     };
+    let (content_bg_rgb, omarchy_css) =
+        if config.appearance.ui_theme == app_config::UiTheme::Omarchy {
+            let palette = crate::omarchy_theme::load_active_palette();
+            let bg_rgb = palette
+                .map(|p| (p.background.r, p.background.g, p.background.b))
+                .unwrap_or(CONTENT_BACKGROUND_RGB);
+            let unread_override = (config.appearance.unread_color
+                != app_config::UnreadColor::default())
+            .then(|| config.appearance.unread_color.css_color());
+            (
+                bg_rgb,
+                crate::omarchy_theme::build_omarchy_css(palette.as_ref(), unread_override),
+            )
+        } else {
+            (CONTENT_BACKGROUND_RGB, String::new())
+        };
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        build_window_css(background_opacity),
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        build_window_css_with_bg(background_opacity, content_bg_rgb),
         pane::PANE_CSS,
         crate::terminal::CLIPBOARD_TOAST_CSS,
         keybind_editor::KEYBIND_EDITOR_CSS,
         crate::settings_editor::SETTINGS_CSS,
         crate::settings_editor::ui_scale_css(config),
         ssd_css,
+        omarchy_css,
         workspace_color::workspace_color_css(),
         sidebar_groups::workspace_group_css(),
         chrome_css(),
@@ -2244,6 +2288,7 @@ pub fn build_window(app: &adw::Application) {
         _theme_portal_signal: None,
         _theme_gnome_settings: None,
         _theme_gnome_signal: None,
+        omarchy_theme_watcher: None,
         _desktop_notification_token_signal: None,
         _desktop_notification_action_signal: None,
         _desktop_notification_closed_signal: None,
@@ -2343,6 +2388,7 @@ pub fn build_window(app: &adw::Application) {
         s._theme_gnome_settings = gnome_interface_settings.clone();
         s._theme_gnome_signal = theme_gnome_signal;
     }
+    sync_omarchy_theme_watcher(&state);
     connect_portal_appearance_watch_async(
         gnome_interface_settings.clone(),
         state.clone(),
@@ -2486,11 +2532,21 @@ pub fn build_window(app: &adw::Application) {
     // Save the full session on window close.
     {
         let state = state.clone();
-        window.connect_close_request(move |_| {
+        window.connect_close_request(move |window| {
             if !prepare_session_close(&state) {
                 return glib::Propagation::Stop;
             }
+            // Settings left open would keep the application running.
+            let windows = window.application().map(|app| app.windows());
+            for other in windows.unwrap_or_default() {
+                if other.transient_for().as_ref() == Some(window.upcast_ref()) {
+                    other.destroy();
+                }
+            }
             stop_session_saves_for_shutdown(&state);
+            if let Some(watcher) = state.borrow_mut().omarchy_theme_watcher.take() {
+                watcher.stop();
+            }
             let split_containers: Vec<_> = state
                 .borrow()
                 .workspaces
@@ -2593,9 +2649,13 @@ fn base_css_for_runtime_gtk() -> std::borrow::Cow<'static, str> {
     }
 }
 
+#[cfg(test)]
 fn build_window_css(background_opacity: f64) -> String {
+    build_window_css_with_bg(background_opacity, CONTENT_BACKGROUND_RGB)
+}
+
+fn build_window_css_with_bg(background_opacity: f64, (r, g, b): (u8, u8, u8)) -> String {
     let background_opacity = sanitize_background_opacity(background_opacity);
-    let (r, g, b) = CONTENT_BACKGROUND_RGB;
     let base_css = base_css_for_runtime_gtk();
     format!(
         "{base_css}\n.limux-content {{\n    background-color: rgba({r}, {g}, {b}, {background_opacity:.3});\n}}\n"
@@ -2811,12 +2871,17 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
     key_controller.connect_key_pressed(move |controller, keyval, keycode, modifier| {
         let matched = {
             let s = state.borrow();
+            let group = controller
+                .current_event()
+                .and_then(|event| event.downcast::<gtk::gdk::KeyEvent>().ok())
+                .map(|event| event.layout() as i32);
             shortcut_match_from_key_press(
                 &s.shortcuts,
                 || controller.widget().map(|widget| widget.display()),
                 keyval,
                 keycode,
                 modifier,
+                group,
             )
         }
         .filter(|matched| {
@@ -2875,7 +2940,12 @@ fn focused_editable_capture_context(state: &State, window: &gtk::Window) -> Edit
         pane::FocusedShortcutTarget::Browser(target) => EditableCaptureContext {
             gtk_editable,
             browser_dom_editable: target.is_page_editable(),
-            browser_find_active: target.is_find_active(),
+            find_active: target.is_find_active(),
+        },
+        pane::FocusedShortcutTarget::Terminal(target) => EditableCaptureContext {
+            gtk_editable,
+            find_active: target.is_find_active(),
+            ..EditableCaptureContext::default()
         },
         _ => EditableCaptureContext {
             gtk_editable,
@@ -2884,7 +2954,7 @@ fn focused_editable_capture_context(state: &State, window: &gtk::Window) -> Edit
     }
 }
 
-fn shortcut_allowed_while_browser_find_active(command: ShortcutCommand) -> bool {
+fn shortcut_allowed_while_find_active(command: ShortcutCommand) -> bool {
     matches!(
         command,
         ShortcutCommand::SurfaceFindNext
@@ -2902,7 +2972,7 @@ fn shortcut_blocked_by_editable(
         return false;
     }
 
-    if context.browser_find_active && shortcut_allowed_while_browser_find_active(command) {
+    if context.find_active && shortcut_allowed_while_find_active(command) {
         return false;
     }
 
@@ -2937,7 +3007,7 @@ struct MatchedShortcut {
 struct EditableCaptureContext {
     gtk_editable: bool,
     browser_dom_editable: bool,
-    browser_find_active: bool,
+    find_active: bool,
 }
 
 fn shortcut_match_from_key_press(
@@ -2946,9 +3016,10 @@ fn shortcut_match_from_key_press(
     keyval: gtk::gdk::Key,
     keycode: u32,
     modifier: gtk::gdk::ModifierType,
+    group: Option<i32>,
 ) -> Option<MatchedShortcut> {
     shortcuts
-        .find_for_key_press_with_display(display, keyval, keycode, modifier)
+        .find_for_key_press_with_display(display, keyval, keycode, modifier, group)
         .map(|shortcut| MatchedShortcut {
             command: shortcut.definition.command,
             editable_capture_policy: shortcut.definition.editable_capture_policy,
@@ -3117,14 +3188,14 @@ fn apply_shortcuts_to_application(app: &adw::Application, shortcuts: &ResolvedSh
 }
 
 fn apply_shortcut_config(state: &State, shortcuts: ResolvedShortcutConfig) {
-    let (app, workspace_roots, shortcuts_rc) = {
+    let (app, panes, shortcuts_rc) = {
         let mut s = state.borrow_mut();
         s.shortcuts = Rc::new(shortcuts);
         (
             s.app.clone(),
             s.workspaces
                 .iter()
-                .map(|ws| ws.root.clone())
+                .flat_map(|ws| ws.split_container.panes())
                 .collect::<Vec<_>>(),
             s.shortcuts.clone(),
         )
@@ -3132,23 +3203,9 @@ fn apply_shortcut_config(state: &State, shortcuts: ResolvedShortcutConfig) {
 
     apply_shortcuts_to_application(&app, &shortcuts_rc);
     sync_sidebar_toggle(state);
-    for root in workspace_roots {
-        refresh_shortcut_tooltips_in_layout(&root, &shortcuts_rc);
+    for pane_widget in panes {
+        pane::refresh_shortcut_tooltips(&pane_widget, &shortcuts_rc);
     }
-}
-
-fn refresh_shortcut_tooltips_in_layout(widget: &gtk::Widget, shortcuts: &ResolvedShortcutConfig) {
-    if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
-        if let Some(start) = paned.start_child() {
-            refresh_shortcut_tooltips_in_layout(&start, shortcuts);
-        }
-        if let Some(end) = paned.end_child() {
-            refresh_shortcut_tooltips_in_layout(&end, shortcuts);
-        }
-        return;
-    }
-
-    pane::refresh_shortcut_tooltips(widget, shortcuts);
 }
 
 /// Open the Settings dialog from the top bar (the cog used to live on the
@@ -3204,8 +3261,12 @@ fn handle_config_change(
     apply_appearance(&style_manager, system_prefers_dark, &updated.appearance);
     if updated.appearance.ui_scale != previous.appearance.ui_scale
         || updated.appearance.unread_color != previous.appearance.unread_color
+        || updated.appearance.ui_theme != previous.appearance.ui_theme
     {
         reload_app_css(state, updated);
+    }
+    if updated.appearance.ui_theme != previous.appearance.ui_theme {
+        sync_omarchy_theme_watcher(state);
     }
     if updated.appearance.show_workspace_path != previous.appearance.show_workspace_path {
         sync_workspace_path_visibility(state, updated.appearance.show_workspace_path);
@@ -3217,13 +3278,17 @@ fn handle_config_change(
     {
         apply_top_bar_mode(state);
     }
-    if let Err(err) = app_config::save(updated) {
+    if let Err(err) = app_config::save(previous, updated) {
         state.borrow().config.borrow_mut().clone_from(previous);
         apply_appearance(&style_manager, system_prefers_dark, &previous.appearance);
         if updated.appearance.ui_scale != previous.appearance.ui_scale
             || updated.appearance.unread_color != previous.appearance.unread_color
+            || updated.appearance.ui_theme != previous.appearance.ui_theme
         {
             reload_app_css(state, previous);
+        }
+        if updated.appearance.ui_theme != previous.appearance.ui_theme {
+            sync_omarchy_theme_watcher(state);
         }
         if updated.appearance.show_workspace_path != previous.appearance.show_workspace_path {
             sync_workspace_path_visibility(state, previous.appearance.show_workspace_path);
@@ -3265,18 +3330,15 @@ fn persist_shortcut_binding(
         return Err("config directory unavailable".to_string());
     };
 
-    shortcut_config::write_shortcuts(&path, &updated).map_err(|err| err.to_string())?;
     let display = {
         let s = state.borrow();
         s.stack.display()
     };
-    let reloaded = shortcut_config::load_shortcuts_or_default_with_display(&path, Some(&display));
-    if !reloaded.warnings.is_empty() {
-        return Err(reloaded.warnings.join("; "));
-    }
+    let saved = shortcut_config::write_shortcuts(&path, &updated, &[id], Some(&display))
+        .map_err(|err| err.to_string())?;
 
-    apply_shortcut_config(state, reloaded.clone());
-    Ok(reloaded)
+    apply_shortcut_config(state, saved.clone());
+    Ok(saved)
 }
 
 fn adw_color_scheme_for(scheme: app_config::ColorScheme) -> adw::ColorScheme {
@@ -3793,14 +3855,65 @@ fn ghostty_prefers_dark(
     }
 }
 
+fn sync_omarchy_theme_watcher(state: &State) {
+    let want_watcher =
+        state.borrow().config.borrow().appearance.ui_theme == app_config::UiTheme::Omarchy;
+    if !want_watcher {
+        if let Some(watcher) = state.borrow_mut().omarchy_theme_watcher.take() {
+            watcher.stop();
+        }
+        return;
+    }
+    if state.borrow().omarchy_theme_watcher.is_some() {
+        return;
+    }
+    let weak_state = Rc::downgrade(state);
+    let style_manager = adw::StyleManager::default();
+    let watcher = crate::omarchy_theme::OmarchyThemeWatcher::start(move || {
+        let Some(state) = weak_state.upgrade() else {
+            return;
+        };
+        let (config_snapshot, system_prefers_dark) = {
+            let s = state.borrow();
+            let cfg = s.config.borrow().clone();
+            let prefers_dark = s.system_prefers_dark.get();
+            (cfg, prefers_dark)
+        };
+        if config_snapshot.appearance.ui_theme == app_config::UiTheme::Omarchy {
+            apply_appearance(
+                &style_manager,
+                system_prefers_dark,
+                &config_snapshot.appearance,
+            );
+            reload_app_css(&state, &config_snapshot);
+        }
+    });
+    state.borrow_mut().omarchy_theme_watcher = Some(watcher);
+}
+
+fn effective_system_prefers_dark_for_appearance(
+    system_prefers_dark: Option<bool>,
+    appearance: &app_config::AppearanceConfig,
+) -> Option<bool> {
+    if appearance.ui_theme == app_config::UiTheme::Omarchy {
+        crate::omarchy_theme::load_active_palette()
+            .map(|palette| palette.is_dark)
+            .or(system_prefers_dark)
+    } else {
+        system_prefers_dark
+    }
+}
+
 fn sync_ghostty_color_scheme_for_config(
     style_manager: &adw::StyleManager,
     system_prefers_dark: Option<bool>,
     appearance: &app_config::AppearanceConfig,
 ) {
+    let effective_system_dark =
+        effective_system_prefers_dark_for_appearance(system_prefers_dark, appearance);
     let dark = ghostty_prefers_dark(
         appearance.ghostty_color_scheme,
-        system_prefers_dark,
+        effective_system_dark,
         style_manager.is_dark(),
     );
     crate::terminal::sync_color_scheme(dark);
@@ -3811,7 +3924,22 @@ fn apply_appearance(
     system_prefers_dark: Option<bool>,
     appearance: &app_config::AppearanceConfig,
 ) {
-    style_manager.set_color_scheme(adw_color_scheme_for(appearance.color_scheme));
+    let effective_scheme = if appearance.ui_theme == app_config::UiTheme::Omarchy
+        && appearance.color_scheme == app_config::ColorScheme::System
+    {
+        crate::omarchy_theme::load_active_palette()
+            .map(|palette| {
+                if palette.is_dark {
+                    app_config::ColorScheme::Dark
+                } else {
+                    app_config::ColorScheme::Light
+                }
+            })
+            .unwrap_or(appearance.color_scheme)
+    } else {
+        appearance.color_scheme
+    };
+    style_manager.set_color_scheme(adw_color_scheme_for(effective_scheme));
     sync_ghostty_color_scheme_for_config(style_manager, system_prefers_dark, appearance);
 }
 
@@ -4337,7 +4465,7 @@ fn build_sidebar_row(
         .build();
     path_label.add_css_class("limux-ws-path");
     if let Some(p) = folder_path {
-        path_label.set_label(&abbreviate_path(p));
+        path_label.set_label(&abbreviate_path(p, dirs::home_dir().as_deref()));
         path_label.set_tooltip_text(Some(p));
     } else {
         path_label.set_label("");
@@ -4469,7 +4597,9 @@ fn render_workspace_card(workspace: &Workspace) {
 /// separate lines like cmux's default card.
 fn refresh_workspace_location(workspace: &Workspace) {
     if let Some(cwd) = workspace.cwd.borrow().as_deref() {
-        workspace.path_label.set_label(&abbreviate_path(cwd));
+        workspace
+            .path_label
+            .set_label(&abbreviate_path(cwd, dirs::home_dir().as_deref()));
         workspace.path_label.set_tooltip_text(Some(cwd));
     }
     let dir = workspace
@@ -4743,14 +4873,12 @@ fn sync_workspace_path_visibility(state: &State, show_workspace_path: bool) {
 }
 
 /// Abbreviate a path by replacing the home directory with ~.
-fn abbreviate_path(path: &str) -> String {
-    if let Some(home) = dirs::home_dir() {
-        let home_str = home.to_string_lossy();
-        if path.starts_with(home_str.as_ref()) {
-            return format!("~{}", &path[home_str.len()..]);
-        }
+fn abbreviate_path(path: &str, home_dir: Option<&Path>) -> String {
+    match home_dir.and_then(|home| Path::new(path).strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.to_string(),
     }
-    path.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -5811,8 +5939,11 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
         }
         app_state.active_idx = app_state.workspaces.len() - 1;
         sync_indicator_active_state(&app_state);
-        app_state.stack.set_visible_child_name(&stack_name);
     }
+    // Without the borrow: the switch unmaps the old workspace, and handlers
+    // that run then read the state.
+    let stack = state.borrow().stack.clone();
+    stack.set_visible_child_name(&stack_name);
 
     {
         let sidebar_list = state.borrow().sidebar_list.clone();
@@ -6542,8 +6673,11 @@ fn break_tabs_into_new_workspace(
             .push_workspace(new_workspace_id.clone(), false);
         app_state.active_idx = app_state.workspaces.len() - 1;
         sync_indicator_active_state(&app_state);
-        app_state.stack.set_visible_child_name(&stack_name);
     }
+    // Without the borrow: the switch unmaps the old workspace, and handlers
+    // that run then read the state.
+    let stack = state.borrow().stack.clone();
+    stack.set_visible_child_name(&stack_name);
 
     {
         let sidebar_list = state.borrow().sidebar_list.clone();
@@ -6588,6 +6722,13 @@ fn break_tabs_into_new_workspace(
 }
 
 fn handle_control_command(state: &State, command: ControlCommand) {
+    let ambiguous = command
+        .workspace_target()
+        .and_then(|target| ambiguous_workspace_name(&state.borrow(), target));
+    if let Some(error) = ambiguous {
+        command.respond(Err(error));
+        return;
+    }
     match command {
         ControlCommand::Identify { caller, reply } => {
             let result = {
@@ -7063,9 +7204,11 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
-            if handle.send_text(&text) {
-                handle.note_driven_input();
+            if !handle.ensure_started() || !handle.send_text(&text) {
+                let _ = reply.send(Err(terminal_not_started()));
+                return;
             }
+            handle.note_driven_input();
             if let Some(map) = payload.as_object_mut() {
                 map.insert("ok".to_string(), serde_json::Value::Bool(true));
             }
@@ -7362,6 +7505,10 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 return;
             };
 
+            if !handle.ensure_started() {
+                let _ = reply.send(Err(terminal_not_started()));
+                return;
+            }
             if !handle.send_key(&key) {
                 let _ = reply.send(Err(crate::control_bridge::BridgeError::invalid_params(
                     "unsupported key",
@@ -8339,8 +8486,7 @@ fn add_workspace_with_initial_command_mode(
         // The new workspace is already active, so the selection does not switch
         // and a collapsed group still shows the one left behind.
         sidebar_groups::sync_row_visibility(state);
-        // Ensure the new pill's visibility honors the show_workspace_indicators
-        // preference, and that pane/sidebar placement is up to date.
+        // Keep pane/sidebar placement up to date without showing workspace pills.
         apply_top_bar_mode(state);
     }
 }
@@ -9168,11 +9314,26 @@ fn record_last_focused_surface_from_window(state: &State, window: &gtk::Window) 
                     note_workspace_pane_focus(&mut app_state, &workspace_id, target.pane_id);
                     app_state.last_focused_surface = Some(target);
                 }
+                read_tab_once_focused(&widget);
                 return;
             }
         }
         focused_widget = widget.parent();
     }
+}
+
+/// Read the active tab of the pane the focus settles in. A split rebuild moves
+/// the focus through other panes first, and they must keep their marks.
+fn read_tab_once_focused(pane_widget: &gtk::Widget) {
+    let pane_widget = pane_widget.downgrade();
+    glib::idle_add_local_once(move || {
+        if let Some(pane_widget) = pane_widget
+            .upgrade()
+            .filter(crate::terminal::focus_is_within)
+        {
+            pane::read_active_tab_in_pane(&pane_widget);
+        }
+    });
 }
 
 fn first_leaf_pane(widget: &gtk::Widget) -> gtk::Widget {
@@ -9513,19 +9674,23 @@ fn should_keep_workspace_open_for_empty_pane(
     ws_id: &str,
     reason: pane::PaneEmptyReason,
 ) -> bool {
-    let s = state.borrow();
-    let enabled = s
+    let enabled = state
+        .borrow()
         .config
         .borrow()
         .workspace
         .keep_open_after_last_terminal_closes;
-    let is_only_pane = s
+
+    keep_workspace_open_after_empty_pane(enabled, reason, has_only_one_pane(state, ws_id))
+}
+
+fn has_only_one_pane(state: &State, ws_id: &str) -> bool {
+    state
+        .borrow()
         .workspaces
         .iter()
         .find(|workspace| workspace.id == ws_id)
-        .is_some_and(|workspace| workspace.split_container.is_single_pane());
-
-    keep_workspace_open_after_empty_pane(enabled, reason, is_only_pane)
+        .is_some_and(|workspace| workspace.split_container.is_single_pane())
 }
 
 fn keep_workspace_open_after_empty_pane(
@@ -9660,6 +9825,21 @@ fn quit_app(state: &State) {
     window.close();
 }
 
+fn new_instance_command(exe: &Path) -> std::process::Command {
+    // An AppImage launcher prepares the WebKit runtime of one instance and
+    // removes it when that instance ends, so every instance needs its own.
+    let launcher = exe.with_file_name("appimage-host-launcher.sh");
+    let program = if launcher.is_file() { &launcher } else { exe };
+    let mut command = std::process::Command::new(program);
+    for (name, value) in crate::launch_environment() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
 fn spawn_new_instance(state: &State) -> bool {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -9671,8 +9851,11 @@ fn spawn_new_instance(state: &State) -> bool {
         }
     };
 
-    match std::process::Command::new(exe).spawn() {
-        Ok(_) => true,
+    match new_instance_command(&exe).spawn() {
+        Ok(child) => {
+            glib::child_watch_add_local(glib::Pid(child.id() as i32), |_, _| {});
+            true
+        }
         Err(err) => {
             let detail = format!("Failed to launch a new Limux instance: {err}");
             eprintln!("limux: {detail}");
@@ -9738,13 +9921,14 @@ fn persist_font_size_reset(state: &State) -> bool {
 }
 
 fn persist_font_size(state: &State, font_size: Option<f32>) -> Result<(), String> {
-    let mut updated = {
+    let previous = {
         let s = state.borrow();
-        let updated = s.config.borrow().clone();
-        updated
+        let previous = s.config.borrow().clone();
+        previous
     };
+    let mut updated = previous.clone();
     updated.font_size = font_size;
-    app_config::save(&updated)?;
+    app_config::save(&previous, &updated)?;
 
     state.borrow().config.borrow_mut().font_size = font_size;
     Ok(())
@@ -9842,14 +10026,10 @@ fn cycle_focused_pane_tab(state: &State, delta: i32) {
 
 fn close_focused_pane(state: &State) {
     if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        let parent = pane_widget.parent();
-        // If this is the only pane (parent is Stack), don't close — keep workspace alive
-        if let Some(ref p) = parent {
-            if p.downcast_ref::<gtk::Stack>().is_some() {
-                return;
-            }
+        // Closing the only pane would close the workspace with all its tabs.
+        if !has_only_one_pane(state, &ws_id) {
+            remove_pane(state, &ws_id, &pane_widget);
         }
-        remove_pane(state, &ws_id, &pane_widget);
     }
 }
 
@@ -9857,20 +10037,6 @@ fn close_focused_tab(state: &State) {
     let Some((_ws_id, pane_widget)) = find_focused_pane(state) else {
         return;
     };
-
-    let config = state.borrow().config.clone();
-    let keep_workspace_open = config
-        .borrow()
-        .workspace
-        .keep_open_after_last_terminal_closes;
-    if let Some(parent) = pane_widget.parent() {
-        if parent.downcast_ref::<gtk::Stack>().is_some()
-            && pane::tab_count_in_pane(&pane_widget) <= 1
-            && !keep_workspace_open
-        {
-            return;
-        }
-    }
 
     if let Some(tab_id) = pane::active_tab_in_pane(&pane_widget) {
         pane::close_tab_in_pane(&pane_widget, &tab_id);
@@ -9943,7 +10109,7 @@ mod tests {
         keep_workspace_open_after_empty_pane, next_active_workspace_index,
         normalize_autostart_command, pane_create_split_placement, queue_session_save_request,
         resolve_pane_create_source_id, resolved_system_prefers_dark, sanitize_background_opacity,
-        shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
+        shortcut_allowed_while_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
         validate_workspace_folder_input_with_dirs, workspace_autostart_dialog_dismisses,
@@ -9985,6 +10151,18 @@ mod tests {
             Some("ssh user@server")
         );
         assert_eq!(normalize_autostart_command("  \t "), None);
+    }
+
+    #[test]
+    fn new_instance_starts_through_the_appimage_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("limux-host");
+        let program =
+            || std::path::PathBuf::from(super::new_instance_command(&exe).get_program().to_owned());
+        assert_eq!(program(), exe);
+        let launcher = dir.path().join("appimage-host-launcher.sh");
+        std::fs::write(&launcher, "").unwrap();
+        assert_eq!(program(), launcher);
     }
 
     #[test]
@@ -10771,7 +10949,7 @@ mod tests {
     fn browser_find_navigation_shortcuts_are_allowed_while_find_ui_is_active() {
         let context = EditableCaptureContext {
             gtk_editable: true,
-            browser_find_active: true,
+            find_active: true,
             ..EditableCaptureContext::default()
         };
 
@@ -10799,16 +10977,16 @@ mod tests {
 
     #[test]
     fn browser_find_active_exception_is_limited_to_navigation_shortcuts() {
-        assert!(shortcut_allowed_while_browser_find_active(
+        assert!(shortcut_allowed_while_find_active(
             ShortcutCommand::SurfaceFindNext
         ));
-        assert!(shortcut_allowed_while_browser_find_active(
+        assert!(shortcut_allowed_while_find_active(
             ShortcutCommand::SurfaceFindPrevious
         ));
-        assert!(shortcut_allowed_while_browser_find_active(
+        assert!(shortcut_allowed_while_find_active(
             ShortcutCommand::SurfaceFindHide
         ));
-        assert!(!shortcut_allowed_while_browser_find_active(
+        assert!(!shortcut_allowed_while_find_active(
             ShortcutCommand::SurfaceFind
         ));
     }
@@ -10976,6 +11154,20 @@ mod tests {
             super::workspace_state_with_folder("API server", "/srv/demo").named_by_user,
             Some(true)
         );
+    }
+
+    #[test]
+    fn workspace_path_shortens_only_the_home_folder_itself() {
+        let home = Some(std::path::Path::new("/home/al"));
+        for (path, shown) in [
+            ("/home/al", "~"),
+            ("/home/al/src/app", "~/src/app"),
+            ("/home/alice/src", "/home/alice/src"),
+            ("/srv", "/srv"),
+        ] {
+            assert_eq!(super::abbreviate_path(path, home), shown);
+        }
+        assert_eq!(super::abbreviate_path("/home/al", None), "/home/al");
     }
 
     #[test]
@@ -11252,6 +11444,10 @@ mod ssh_launch_tests;
 #[cfg(test)]
 #[path = "tab_move_tests.rs"]
 mod tab_move_tests;
+
+#[cfg(test)]
+#[path = "window_state_tests.rs"]
+mod window_state_tests;
 
 #[cfg(test)]
 #[path = "pane_create_tests.rs"]

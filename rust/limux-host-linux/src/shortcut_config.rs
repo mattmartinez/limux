@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -170,6 +170,7 @@ pub struct ResolvedShortcut {
 #[derive(Clone, Debug, Default)]
 struct ShortcutLookupIndex {
     by_binding: HashMap<NormalizedShortcut, usize>,
+    by_alternate: HashMap<NormalizedShortcut, usize>,
     unmodified_keyvals: Vec<(u32, usize)>,
     has_unmodified_fallback: bool,
     has_shift_only_binding: bool,
@@ -179,6 +180,7 @@ impl ShortcutLookupIndex {
     fn build(shortcuts: &[ResolvedShortcut]) -> Self {
         let mut index = Self {
             by_binding: HashMap::with_capacity(shortcuts.len()),
+            by_alternate: HashMap::new(),
             unmodified_keyvals: Vec::new(),
             has_unmodified_fallback: false,
             has_shift_only_binding: false,
@@ -188,6 +190,14 @@ impl ShortcutLookupIndex {
                 continue;
             };
             index.by_binding.insert(binding.clone(), idx);
+            let alternates = shortcut.definition.alternate_accels();
+            if !alternates.is_empty() && *binding == shortcut.definition.default_binding() {
+                index.by_alternate.extend(alternates.iter().map(|accel| {
+                    let alternate = NormalizedShortcut::parse(accel)
+                        .expect("alternate shortcuts should be valid");
+                    (alternate, idx)
+                }));
+            }
             if !binding.ctrl && !binding.alt && !binding.cmd {
                 if binding.shift {
                     index.has_shift_only_binding = true;
@@ -204,6 +214,13 @@ impl ShortcutLookupIndex {
             }
         }
         index
+    }
+
+    fn get(&self, binding: &NormalizedShortcut) -> Option<usize> {
+        self.by_binding
+            .get(binding)
+            .or_else(|| self.by_alternate.get(binding))
+            .copied()
     }
 }
 
@@ -328,6 +345,7 @@ pub enum ShortcutConfigWriteError {
     InvalidExistingRoot {
         path: PathBuf,
     },
+    InvalidShortcuts(ShortcutConfigError),
     CreateParentDir {
         path: PathBuf,
         reason: String,
@@ -356,6 +374,7 @@ impl std::fmt::Display for ShortcutConfigWriteError {
                     path.display()
                 )
             }
+            Self::InvalidShortcuts(err) => write!(f, "{err}"),
             Self::CreateParentDir { path, reason } => {
                 write!(
                     f,
@@ -975,7 +994,17 @@ impl NormalizedShortcut {
         keycode: u32,
         modifier: gdk::ModifierType,
     ) -> Option<Self> {
-        let key = normalized_event_key(display, keyval, keycode)?;
+        Self::from_gdk_key_event_in_group(display, keyval, keycode, modifier, None)
+    }
+
+    pub fn from_gdk_key_event_in_group(
+        display: Option<&gdk::Display>,
+        keyval: gdk::Key,
+        keycode: u32,
+        modifier: gdk::ModifierType,
+        group: Option<i32>,
+    ) -> Option<Self> {
+        let key = normalized_event_key(display, keyval, keycode, group)?;
         if is_modifier_only_key(&key) {
             return None;
         }
@@ -1013,7 +1042,7 @@ impl NormalizedShortcut {
             match modifier.as_str() {
                 "ctrl" | "control" => ctrl = true,
                 "shift" => shift = true,
-                "alt" | "option" => alt = true,
+                "alt" | "opt" | "option" => alt = true,
                 "meta" | "super" | "cmd" | "command" => cmd = true,
                 _ => {
                     return Err(ShortcutConfigError::UnknownModifier {
@@ -1244,7 +1273,19 @@ impl ResolvedShortcutConfig {
         keycode: u32,
         modifier: gdk::ModifierType,
     ) -> Option<&ResolvedShortcut> {
-        self.find_for_key_press_with_display(|| display.cloned(), keyval, keycode, modifier)
+        self.find_for_key_press_in_group(display, keyval, keycode, modifier, None)
+    }
+
+    #[cfg(test)]
+    pub fn find_for_key_press_in_group(
+        &self,
+        display: Option<&gdk::Display>,
+        keyval: gdk::Key,
+        keycode: u32,
+        modifier: gdk::ModifierType,
+        group: Option<i32>,
+    ) -> Option<&ResolvedShortcut> {
+        self.find_for_key_press_with_display(|| display.cloned(), keyval, keycode, modifier, group)
     }
 
     pub fn find_for_key_press_with_display(
@@ -1253,6 +1294,7 @@ impl ResolvedShortcutConfig {
         keyval: gdk::Key,
         keycode: u32,
         modifier: gdk::ModifierType,
+        group: Option<i32>,
     ) -> Option<&ResolvedShortcut> {
         let has_base_modifier = modifier.intersects(
             gdk::ModifierType::CONTROL_MASK
@@ -1276,16 +1318,30 @@ impl ResolvedShortcutConfig {
             }
         }
         let resolved_display = display();
-        let shortcut = NormalizedShortcut::from_gdk_key_event(
+        let shortcut = NormalizedShortcut::from_gdk_key_event_in_group(
             resolved_display.as_ref(),
             keyval,
             keycode,
             modifier,
+            group,
         )?;
         self.index
-            .by_binding
             .get(&shortcut)
-            .and_then(|&idx| self.shortcuts.get(idx))
+            .or_else(|| {
+                if !has_base_modifier {
+                    return None;
+                }
+                fallback_shortcuts(
+                    resolved_display.as_ref()?,
+                    keyval,
+                    keycode,
+                    group,
+                    &shortcut,
+                )
+                .into_iter()
+                .find_map(|fallback| self.index.get(&fallback))
+            })
+            .and_then(|idx| self.shortcuts.get(idx))
     }
 
     pub fn override_bindings_json(&self) -> Map<String, Value> {
@@ -1318,7 +1374,19 @@ impl ResolvedShortcutConfig {
         {
             shortcut.binding = binding;
         }
-        ensure_valid_active_bindings(&updated.shortcuts)?;
+        ensure_valid_active_bindings(&updated.shortcuts).map_err(|err| match err {
+            // The edited shortcut is the new one, wherever the table lists it.
+            ShortcutConfigError::DuplicateBinding {
+                first,
+                second,
+                accel,
+            } if first == id => ShortcutConfigError::DuplicateBinding {
+                first: second,
+                second: first,
+                accel,
+            },
+            err => err,
+        })?;
         updated.rebuild_index();
         Ok(updated)
     }
@@ -1331,6 +1399,16 @@ pub fn definitions() -> &'static [ShortcutDefinition] {
 impl ShortcutDefinition {
     pub fn requires_base_modifier(&self) -> bool {
         !matches!(self.id, ShortcutId::ToggleFullscreen)
+    }
+
+    /// Other combos that run the action while it has its default binding.
+    /// `+` shares a key with `=` on some layouts and has its own on others.
+    fn alternate_accels(&self) -> &'static [&'static str] {
+        match self.id {
+            ShortcutId::TerminalIncreaseFontSize => &["<Ctrl><Alt>plus", "<Ctrl><Alt>KP_Add"],
+            ShortcutId::TerminalDecreaseFontSize => &["<Ctrl><Alt>KP_Subtract"],
+            _ => &[],
+        }
     }
 
     pub fn default_binding(&self) -> NormalizedShortcut {
@@ -1474,9 +1552,21 @@ fn load_legacy_shortcuts_or_default(
         return default_shortcuts();
     };
 
-    match resolve_shortcuts_from_file(parsed, display) {
+    let ids: Vec<ShortcutId> = parsed
+        .shortcuts
+        .keys()
+        .filter_map(|key| definition_by_config_key(key))
+        .map(|definition| definition.id)
+        .collect();
+    // The new file replaces the legacy one, so an entry that cannot be read
+    // stops the migration instead of being left behind.
+    let unreadable = parsed.shortcuts.iter().find_map(|(key, value)| {
+        override_binding(definition_by_config_key(key)?, value, display).err()
+    });
+
+    match unreadable.map_or_else(|| resolve_shortcuts_from_file(parsed, display), Err) {
         Ok(mut config) => {
-            if let Err(err) = write_shortcuts(canonical_path, &config) {
+            if let Err(err) = write_shortcuts(canonical_path, &config, &ids, display) {
                 config.warnings.push(format!(
                     "loaded legacy shortcut config `{}` but failed to migrate to `{}`: {err}",
                     legacy_path.display(),
@@ -1536,18 +1626,64 @@ pub fn load_shortcuts_for_display(display: &gdk::Display) -> ResolvedShortcutCon
     load_shortcuts_or_default_with_display(&path, Some(display))
 }
 
+/// Save the bindings of `ids` and return what the file now resolves to.
+///
+/// Every other entry stays as it is. It can belong to another instance or a
+/// newer build, or be one that this build cannot read.
 pub fn write_shortcuts(
     path: &Path,
     shortcuts: &ResolvedShortcutConfig,
-) -> Result<(), ShortcutConfigWriteError> {
+    ids: &[ShortcutId],
+    display: Option<&gdk::Display>,
+) -> Result<ResolvedShortcutConfig, ShortcutConfigWriteError> {
     let mut root = read_existing_config_root(path)?;
-    let overrides = shortcuts.override_bindings_json();
-    if overrides.is_empty() {
-        root.remove("shortcuts");
-    } else {
-        root.insert("shortcuts".to_string(), Value::Object(overrides));
+    let mut entries = match root.remove("shortcuts") {
+        Some(Value::Object(entries)) => entries,
+        _ => Map::new(),
+    };
+    let mut overrides = shortcuts.override_bindings_json();
+    for definition in definitions().iter().filter(|def| ids.contains(&def.id)) {
+        match overrides.remove(definition.config_key) {
+            Some(value) => entries.insert(definition.config_key.to_string(), value),
+            None => entries.remove(definition.config_key),
+        };
     }
-    write_config_root_atomically(path, root)
+
+    let saved = resolve_shortcuts_from_file(
+        ShortcutConfigFile {
+            shortcuts: entries.clone().into_iter().collect(),
+        },
+        display,
+    )
+    .map_err(ShortcutConfigWriteError::InvalidShortcuts)?;
+    if !entries.is_empty() {
+        root.insert("shortcuts".to_string(), Value::Object(entries));
+    }
+    write_config_root_atomically(path, root)?;
+    Ok(saved)
+}
+
+/// The binding that an entry in the config file asks for.
+fn override_binding(
+    definition: &ShortcutDefinition,
+    value: &Value,
+    display: Option<&gdk::Display>,
+) -> Result<Option<NormalizedShortcut>, ShortcutConfigError> {
+    let accel = match value {
+        Value::Null => return Ok(None),
+        Value::String(value) => value.trim(),
+        _ => {
+            return Err(ShortcutConfigError::InvalidBindingType {
+                shortcut_id: definition.config_key.to_string(),
+            });
+        }
+    };
+    if accel.is_empty() {
+        return Ok(None);
+    }
+    let binding = canonicalize_loaded_binding(display, NormalizedShortcut::parse(accel)?);
+    binding.validate_host_binding(definition)?;
+    Ok(Some(binding))
 }
 
 fn resolve_shortcuts_from_file(
@@ -1555,6 +1691,7 @@ fn resolve_shortcuts_from_file(
     display: Option<&gdk::Display>,
 ) -> Result<ResolvedShortcutConfig, ShortcutConfigError> {
     let mut resolved = default_shortcuts();
+    let mut overridden = HashSet::new();
 
     for (shortcut_id, value) in parsed.shortcuts {
         let Some(definition) = definition_by_config_key(&shortcut_id) else {
@@ -1564,23 +1701,13 @@ fn resolve_shortcuts_from_file(
             continue;
         };
 
-        let binding = match value {
-            serde_json::Value::Null => None,
-            serde_json::Value::String(value) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(canonicalize_loaded_binding(
-                        display,
-                        NormalizedShortcut::parse(trimmed)?,
-                    ))
-                }
-            }
-            _ => {
-                return Err(ShortcutConfigError::InvalidBindingType {
-                    shortcut_id: shortcut_id.clone(),
-                });
+        let binding = match override_binding(definition, &value, display) {
+            Ok(binding) => binding,
+            Err(err) => {
+                resolved
+                    .warnings
+                    .push(format!("ignoring shortcut `{shortcut_id}`: {err}"));
+                continue;
             }
         };
 
@@ -1590,12 +1717,46 @@ fn resolve_shortcuts_from_file(
             .find(|shortcut| shortcut.definition.id == definition.id)
         {
             slot.binding = binding;
+            overridden.insert(definition.id);
         }
     }
 
+    unbind_overridden_defaults(&mut resolved, &overridden);
     ensure_valid_active_bindings(&resolved.shortcuts)?;
     resolved.rebuild_index();
     Ok(resolved)
+}
+
+/// The user's choice wins over a default, which can be newer than that choice.
+fn unbind_overridden_defaults(
+    resolved: &mut ResolvedShortcutConfig,
+    overridden: &HashSet<ShortcutId>,
+) {
+    let chosen: HashMap<NormalizedShortcut, &'static ShortcutDefinition> = resolved
+        .shortcuts
+        .iter()
+        .filter(|shortcut| overridden.contains(&shortcut.definition.id))
+        .filter_map(|shortcut| Some((shortcut.binding.clone()?, shortcut.definition)))
+        .collect();
+
+    for shortcut in &mut resolved.shortcuts {
+        if overridden.contains(&shortcut.definition.id) {
+            continue;
+        }
+        if let Some((accel, owner)) = shortcut
+            .binding
+            .as_ref()
+            .and_then(|binding| chosen.get_key_value(binding))
+        {
+            resolved.warnings.push(format!(
+                "`{}` is assigned to {}, so {} has no shortcut",
+                accel.to_config_accel(),
+                owner.label,
+                shortcut.definition.label
+            ));
+            shortcut.binding = None;
+        }
+    }
 }
 
 fn ensure_valid_active_bindings(shortcuts: &[ResolvedShortcut]) -> Result<(), ShortcutConfigError> {
@@ -1705,9 +1866,10 @@ fn normalized_event_key(
     display: Option<&gdk::Display>,
     keyval: gdk::Key,
     keycode: u32,
+    group: Option<i32>,
 ) -> Option<String> {
     let resolved = display
-        .and_then(|display| unshifted_keyval_for_event(display, keyval, keycode))
+        .and_then(|display| unshifted_keyval_for_event(display, keyval, keycode, group))
         .unwrap_or(keyval);
     resolved
         .name()
@@ -1718,14 +1880,146 @@ fn unshifted_keyval_for_event(
     display: &gdk::Display,
     keyval: gdk::Key,
     keycode: u32,
+    group: Option<i32>,
 ) -> Option<gdk::Key> {
     if keycode == 0 {
         return None;
     }
 
-    let keyval_mappings = display.map_keyval(keyval)?;
     let keycode_mappings = display.map_keycode(keycode)?;
-    unshifted_keyval_from_mappings(keycode, &keyval_mappings, &keycode_mappings)
+    let keyval_mappings = display.map_keyval(keyval).unwrap_or_default();
+    unshifted_keyval_from_mappings(keycode, group, &keyval_mappings, &keycode_mappings)
+}
+
+/// Further readings of a key press, for a binding that names a key which the
+/// active layout has elsewhere. The caller tries the exact reading first.
+fn fallback_shortcuts(
+    display: &gdk::Display,
+    keyval: gdk::Key,
+    keycode: u32,
+    group: Option<i32>,
+    exact: &NormalizedShortcut,
+) -> Vec<NormalizedShortcut> {
+    if keycode == 0 {
+        return Vec::new();
+    }
+
+    let keyval_mappings = display.map_keyval(keyval).unwrap_or_default();
+    let keycode_mappings = display.map_keycode(keycode).unwrap_or_default();
+    let has_latin_letters = |group| {
+        display
+            .map_keyval(gdk::Key::a)
+            .is_some_and(|mappings| group_has_latin_letters(&mappings, group))
+    };
+    fallback_shortcuts_from_mappings(
+        keyval,
+        keycode,
+        group,
+        exact,
+        &keyval_mappings,
+        &keycode_mappings,
+        has_latin_letters,
+    )
+}
+
+fn fallback_shortcuts_from_mappings(
+    keyval: gdk::Key,
+    keycode: u32,
+    group: Option<i32>,
+    exact: &NormalizedShortcut,
+    keyval_mappings: &[gdk::KeymapKey],
+    keycode_mappings: &[(gdk::KeymapKey, gdk::Key)],
+    has_latin_letters: impl Fn(i32) -> bool,
+) -> Vec<NormalizedShortcut> {
+    let mut readings = Vec::new();
+    // The typed symbol. Shift only selected it, so it is not part of the combo.
+    let is_letter = keyval.to_unicode().is_some_and(char::is_alphabetic);
+    if let Some(key) = keyval.name().map(|name| normalize_runtime_key(&name)) {
+        if !is_letter && key != exact.key {
+            readings.push(NormalizedShortcut {
+                key,
+                shift: false,
+                ..exact.clone()
+            });
+        }
+    }
+
+    if let Some(key) = fallback_keyval_from_mappings(
+        keycode,
+        group,
+        keyval_mappings,
+        keycode_mappings,
+        has_latin_letters,
+    )
+    .and_then(|key| key.name())
+    {
+        readings.push(NormalizedShortcut {
+            key: normalize_runtime_key(&key),
+            ..exact.clone()
+        });
+    }
+    readings
+}
+
+fn group_has_latin_letters(latin_a_mappings: &[gdk::KeymapKey], group: i32) -> bool {
+    latin_a_mappings
+        .iter()
+        .any(|mapping| mapping.group() == group && mapping.level() == 0)
+}
+
+/// The digit on the key, as on a French layout where it needs Shift. On a
+/// layout without Latin letters, the key that a Latin layout has there.
+fn fallback_keyval_from_mappings(
+    keycode: u32,
+    group: Option<i32>,
+    keyval_mappings: &[gdk::KeymapKey],
+    keycode_mappings: &[(gdk::KeymapKey, gdk::Key)],
+    has_latin_letters: impl Fn(i32) -> bool,
+) -> Option<gdk::Key> {
+    let group = resolve_group(keycode, group, keyval_mappings, keycode_mappings)?;
+    let mut on_key = keycode_mappings
+        .iter()
+        .filter(|(mapping, _)| mapping.keycode() == keycode);
+    let digit = on_key.clone().find(|(mapping, key)| {
+        mapping.group() == group
+            && mapping.level() == 1
+            && key.to_unicode().is_some_and(|ch| ch.is_ascii_digit())
+    });
+    if let Some((_, digit)) = digit {
+        return Some(*digit);
+    }
+    if has_latin_letters(group) {
+        return None;
+    }
+    on_key
+        .find(|(mapping, key)| {
+            mapping.group() != group
+                && mapping.level() == 0
+                && key.to_unicode().is_some_and(|ch| ch.is_ascii_graphic())
+        })
+        .map(|(_, key)| *key)
+}
+
+fn resolve_group(
+    keycode: u32,
+    group: Option<i32>,
+    keyval_mappings: &[gdk::KeymapKey],
+    keycode_mappings: &[(gdk::KeymapKey, gdk::Key)],
+) -> Option<i32> {
+    group
+        .filter(|group| {
+            keycode_mappings
+                .iter()
+                .any(|(mapping, _)| mapping.keycode() == keycode && mapping.group() == *group)
+        })
+        .or_else(|| group_from_mappings(keycode, keyval_mappings))
+}
+
+fn group_from_mappings(keycode: u32, keyval_mappings: &[gdk::KeymapKey]) -> Option<i32> {
+    keyval_mappings
+        .iter()
+        .find(|mapping| mapping.keycode() == keycode)
+        .map(gdk::KeymapKey::group)
 }
 
 fn canonicalize_loaded_binding(
@@ -1760,6 +2054,7 @@ fn unshifted_keyval_for_loaded_binding(
         let keycode_mappings = display.map_keycode(mapping.keycode())?;
         if let Some(unshifted) = unshifted_keyval_from_mappings(
             mapping.keycode(),
+            None,
             std::slice::from_ref(&mapping),
             &keycode_mappings,
         ) {
@@ -1771,13 +2066,11 @@ fn unshifted_keyval_for_loaded_binding(
 
 fn unshifted_keyval_from_mappings(
     keycode: u32,
+    group: Option<i32>,
     keyval_mappings: &[gdk::KeymapKey],
     keycode_mappings: &[(gdk::KeymapKey, gdk::Key)],
 ) -> Option<gdk::Key> {
-    let group = keyval_mappings
-        .iter()
-        .find(|mapping| mapping.keycode() == keycode)
-        .map(gdk::KeymapKey::group)?;
+    let group = resolve_group(keycode, group, keyval_mappings, keycode_mappings)?;
 
     keycode_mappings
         .iter()
@@ -1941,6 +2234,10 @@ mod tests {
         );
         assert_eq!(shortcut.to_runtime_combo(), "shift+cmd+t");
         assert_eq!(shortcut.to_display_label(), "Shift+Cmd+T");
+        assert_eq!(
+            NormalizedShortcut::parse("<Opt>x"),
+            NormalizedShortcut::parse("<Alt>x")
+        );
     }
 
     #[test]
@@ -1953,7 +2250,7 @@ mod tests {
         ];
 
         let unshifted =
-            unshifted_keyval_from_mappings(10, &keyval_mappings, &keycode_mappings).unwrap();
+            unshifted_keyval_from_mappings(10, None, &keyval_mappings, &keycode_mappings).unwrap();
         assert_eq!(unshifted, gdk::Key::_0);
 
         let shortcut = NormalizedShortcut::from_gdk_key_event(
@@ -1964,6 +2261,479 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shortcut.to_display_label(), "Ctrl+Shift+0");
+    }
+
+    #[test]
+    fn active_group_disambiguates_secondary_azerty_shifted_digits() {
+        // Group 0 is US, group 1 is French AZERTY.
+        // Key 15: US has 6 / ^, FR has - / 6.
+        // Key 19: US has 0 / ), FR has agrave / 0.
+        let on_key_15 = vec![
+            (gdk::KeymapKey::new(15, 0, 0), gdk::Key::_6),
+            (gdk::KeymapKey::new(15, 0, 1), gdk::Key::asciicircum),
+            (gdk::KeymapKey::new(15, 1, 0), gdk::Key::minus),
+            (gdk::KeymapKey::new(15, 1, 1), gdk::Key::_6),
+        ];
+        // map_keyval(Key::_6) lists group 0 before group 1.
+        let keyval_6 = vec![gdk::KeymapKey::new(15, 0, 0), gdk::KeymapKey::new(15, 1, 1)];
+        let defaults = default_shortcuts();
+        let ctrl_alt_shift = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK;
+
+        let resolve_with_group =
+            |keyval: gdk::Key,
+             keycode: u32,
+             group: Option<i32>,
+             keyval_mappings: &[gdk::KeymapKey],
+             keycode_mappings: &[(gdk::KeymapKey, gdk::Key)]| {
+                let unshifted = unshifted_keyval_from_mappings(
+                    keycode,
+                    group,
+                    keyval_mappings,
+                    keycode_mappings,
+                )
+                .unwrap_or(keyval);
+                let exact =
+                    NormalizedShortcut::from_gdk_key_event(None, unshifted, 0, ctrl_alt_shift)?;
+                defaults
+                    .index
+                    .get(&exact)
+                    .or_else(|| {
+                        fallback_shortcuts_from_mappings(
+                            keyval,
+                            keycode,
+                            group,
+                            &exact,
+                            keyval_mappings,
+                            keycode_mappings,
+                            |_| true,
+                        )
+                        .into_iter()
+                        .find_map(|fallback| defaults.index.get(&fallback))
+                    })
+                    .and_then(|idx| defaults.shortcuts.get(idx))
+                    .map(|shortcut| shortcut.definition.command)
+            };
+
+        assert_eq!(
+            resolve_with_group(gdk::Key::_6, 15, Some(1), &keyval_6, &on_key_15),
+            Some(ShortcutCommand::ActivateWorkspace6),
+            "Ctrl+Alt+Shift+6 on us,fr with fr active must resolve using group 1"
+        );
+        assert_eq!(
+            resolve_with_group(
+                gdk::Key::asciicircum,
+                15,
+                Some(0),
+                &[gdk::KeymapKey::new(15, 0, 1)],
+                &on_key_15,
+            ),
+            None,
+            "Ctrl+Alt+Shift+6 on us,fr with us active must stay unbound"
+        );
+
+        let on_key_19 = vec![
+            (gdk::KeymapKey::new(19, 0, 0), gdk::Key::_0),
+            (gdk::KeymapKey::new(19, 0, 1), gdk::Key::parenright),
+            (gdk::KeymapKey::new(19, 1, 0), gdk::Key::agrave),
+            (gdk::KeymapKey::new(19, 1, 1), gdk::Key::_0),
+        ];
+        let keyval_0 = vec![gdk::KeymapKey::new(19, 0, 0), gdk::KeymapKey::new(19, 1, 1)];
+        assert_eq!(
+            resolve_with_group(gdk::Key::_0, 19, Some(1), &keyval_0, &on_key_19),
+            Some(ShortcutCommand::TerminalResetFontSize),
+            "Ctrl+Alt+Shift+0 on us,fr with fr active must keep Shift for reset font size"
+        );
+    }
+
+    #[test]
+    fn fallback_keyval_reads_digits_and_the_latin_key_of_another_layout() {
+        // Group 0 is French or Russian, and group 1 is US. Key 12 has a digit
+        // behind Shift in group 0, and key 40 has the letter D in group 1.
+        // Key 46 simulates a Neo-style Layer 4 numpad digit on level 3.
+        let on_key = vec![
+            (gdk::KeymapKey::new(12, 0, 0), gdk::Key::quotedbl),
+            (gdk::KeymapKey::new(12, 0, 1), gdk::Key::_3),
+            (gdk::KeymapKey::new(40, 0, 0), gdk::Key::Cyrillic_ve),
+            (gdk::KeymapKey::new(40, 1, 0), gdk::Key::d),
+            (gdk::KeymapKey::new(34, 0, 0), gdk::Key::udiaeresis),
+            (gdk::KeymapKey::new(34, 1, 0), gdk::Key::bracketleft),
+            (gdk::KeymapKey::new(46, 0, 0), gdk::Key::l),
+            (gdk::KeymapKey::new(46, 0, 1), gdk::Key::L),
+            (gdk::KeymapKey::new(46, 0, 3), gdk::Key::_6),
+        ];
+        let fallback = |keycode, has_latin_letters| {
+            fallback_keyval_from_mappings(
+                keycode,
+                Some(0),
+                &[gdk::KeymapKey::new(keycode, 0, 0)],
+                &on_key,
+                |_| has_latin_letters,
+            )
+        };
+
+        assert_eq!(fallback(12, true), Some(gdk::Key::_3));
+        assert_eq!(fallback(40, false), Some(gdk::Key::d));
+        assert_eq!(
+            fallback(34, true),
+            None,
+            "a Latin layout keeps its own keys"
+        );
+        assert_eq!(
+            fallback(46, true),
+            None,
+            "digits on Layer 4 (level 3) must not hijack letter shortcuts"
+        );
+        assert_eq!(fallback(99, false), None);
+
+        // Non-Latin layouts that only expose Latin `a` via AltGr (level 2) are not Latin.
+        let latin_a = vec![gdk::KeymapKey::new(38, 0, 0), gdk::KeymapKey::new(38, 1, 2)];
+        assert!(group_has_latin_letters(&latin_a, 0));
+        assert!(!group_has_latin_letters(&latin_a, 1));
+    }
+
+    #[test]
+    fn plus_increases_the_font_size_until_the_shortcut_changes() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        let command = |shortcuts: &ResolvedShortcutConfig, key| {
+            shortcuts
+                .find_for_key_press(None, key, 0, modifiers)
+                .map(|shortcut| shortcut.definition.command)
+        };
+        let defaults = default_shortcuts();
+        for key in [gdk::Key::equal, gdk::Key::plus, gdk::Key::KP_Add] {
+            assert_eq!(
+                command(&defaults, key),
+                Some(ShortcutCommand::TerminalIncreaseFontSize)
+            );
+        }
+        assert_eq!(
+            command(&defaults, gdk::Key::KP_Subtract),
+            Some(ShortcutCommand::TerminalDecreaseFontSize)
+        );
+
+        let plus = NormalizedShortcut::parse("<Ctrl><Alt>plus").unwrap();
+        let taken = defaults
+            .with_binding(ShortcutId::SplitRight, Some(plus))
+            .unwrap();
+        assert_eq!(
+            command(&taken, gdk::Key::plus),
+            Some(ShortcutCommand::SplitRight)
+        );
+        let unbound = defaults
+            .with_binding(ShortcutId::TerminalIncreaseFontSize, None)
+            .unwrap();
+        assert_eq!(command(&unbound, gdk::Key::plus), None);
+    }
+
+    #[test]
+    #[ignore = "requires X11 and setxkbmap; exercised by xvfb-smoke-test.sh"]
+    fn default_shortcuts_work_on_other_layouts() {
+        use crate::shortcut_config::ShortcutCommand::*;
+        use gdk::{Key, ModifierType as Mods};
+        let ctrl = Mods::CONTROL_MASK;
+        let ctrl_alt = ctrl | Mods::ALT_MASK;
+        let shift = Mods::SHIFT_MASK;
+        let altgr = Mods::from_bits_retain(1 << 7);
+
+        gtk4::init().expect("GTK display required");
+        let display = gdk::Display::default().unwrap();
+        let defaults = default_shortcuts();
+        for (layout, presses) in [
+            (
+                "us",
+                vec![
+                    (
+                        "Ctrl+Alt+=",
+                        Key::equal,
+                        21,
+                        ctrl_alt,
+                        Some(TerminalIncreaseFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt++",
+                        Key::plus,
+                        21,
+                        ctrl_alt | shift,
+                        Some(TerminalIncreaseFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+-",
+                        Key::minus,
+                        20,
+                        ctrl_alt,
+                        Some(TerminalDecreaseFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+Shift+0",
+                        Key::parenright,
+                        19,
+                        ctrl_alt | shift,
+                        Some(TerminalResetFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+1",
+                        Key::_1,
+                        10,
+                        ctrl_alt,
+                        Some(ActivateWorkspace1),
+                    ),
+                    ("Ctrl+Alt+Shift+1", Key::exclam, 10, ctrl_alt | shift, None),
+                    ("Ctrl+[", Key::bracketleft, 34, ctrl, Some(BrowserBack)),
+                    ("Ctrl+Shift+Y", Key::Y, 29, ctrl | shift, None),
+                ],
+            ),
+            (
+                "de,us",
+                vec![
+                    (
+                        "Ctrl+Alt++",
+                        Key::plus,
+                        35,
+                        ctrl_alt,
+                        Some(TerminalIncreaseFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+-",
+                        Key::minus,
+                        61,
+                        ctrl_alt,
+                        Some(TerminalDecreaseFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+Shift+0",
+                        Key::equal,
+                        19,
+                        ctrl_alt | shift,
+                        Some(TerminalResetFontSize),
+                    ),
+                    (
+                        "Ctrl+Shift+Z",
+                        Key::Z,
+                        29,
+                        ctrl | shift,
+                        Some(ToggleFocusedPaneZoom),
+                    ),
+                    ("Ctrl+Shift+Y", Key::Y, 52, ctrl | shift, None),
+                    (
+                        "Ctrl+[",
+                        Key::bracketleft,
+                        17,
+                        ctrl | altgr,
+                        Some(BrowserBack),
+                    ),
+                    ("Ctrl+ü", Key::udiaeresis, 34, ctrl, None),
+                    ("@", Key::at, 24, altgr, None),
+                ],
+            ),
+            (
+                "fr",
+                vec![
+                    (
+                        "Ctrl+Alt+1",
+                        Key::ampersand,
+                        10,
+                        ctrl_alt,
+                        Some(ActivateWorkspace1),
+                    ),
+                    (
+                        "Ctrl+Alt+Shift+1",
+                        Key::_1,
+                        10,
+                        ctrl_alt | shift,
+                        Some(ActivateWorkspace1),
+                    ),
+                    (
+                        "Ctrl+Alt+2",
+                        Key::eacute,
+                        11,
+                        ctrl_alt,
+                        Some(ActivateWorkspace2),
+                    ),
+                    (
+                        "Ctrl+Alt+9",
+                        Key::ccedilla,
+                        18,
+                        ctrl_alt,
+                        Some(ActivateLastWorkspace),
+                    ),
+                    (
+                        "Ctrl+Alt+Shift+0",
+                        Key::_0,
+                        19,
+                        ctrl_alt | shift,
+                        Some(TerminalResetFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+-",
+                        Key::minus,
+                        15,
+                        ctrl_alt,
+                        Some(TerminalDecreaseFontSize),
+                    ),
+                    (
+                        "Ctrl+Alt+Shift+6",
+                        Key::_6,
+                        15,
+                        ctrl_alt | shift,
+                        Some(ActivateWorkspace6),
+                    ),
+                    (
+                        "Ctrl+Alt+=",
+                        Key::equal,
+                        21,
+                        ctrl_alt,
+                        Some(TerminalIncreaseFontSize),
+                    ),
+                    ("Ctrl+Alt+Q", Key::q, 38, ctrl_alt, Some(QuitApp)),
+                    ("#", Key::numbersign, 12, altgr, None),
+                ],
+            ),
+            (
+                "il",
+                vec![
+                    ("Ctrl+Alt+מ", Key::hebrew_mem, 57, ctrl_alt, None),
+                    ("Ctrl+Alt+Shift+N", Key::N, 57, ctrl_alt | shift, None),
+                ],
+            ),
+            (
+                "us,ru",
+                vec![
+                    ("Ctrl+Alt+D", Key::d, 40, ctrl_alt, Some(SplitRight)),
+                    (
+                        "Ctrl+Alt+В",
+                        Key::Cyrillic_ve,
+                        40,
+                        ctrl_alt,
+                        Some(SplitRight),
+                    ),
+                    (
+                        "Ctrl+Shift+С",
+                        Key::Cyrillic_ES,
+                        54,
+                        ctrl | shift,
+                        Some(TerminalCopy),
+                    ),
+                    ("Ctrl+С", Key::Cyrillic_es, 54, ctrl, None),
+                    (
+                        "Ctrl+Alt+1",
+                        Key::_1,
+                        10,
+                        ctrl_alt,
+                        Some(ActivateWorkspace1),
+                    ),
+                ],
+            ),
+        ] {
+            let status = std::process::Command::new("setxkbmap")
+                .args(["-layout", layout])
+                .status();
+            assert!(status.is_ok_and(|status| status.success()), "{layout}");
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let keymap_arrived = || {
+                presses.iter().all(|(_, keyval, keycode, ..)| {
+                    display
+                        .map_keyval(*keyval)
+                        .is_some_and(|keys| keys.iter().any(|key| key.keycode() == *keycode))
+                })
+            };
+            while !keymap_arrived() && std::time::Instant::now() < until {
+                gtk4::glib::MainContext::default().iteration(false);
+            }
+            for (press, keyval, keycode, modifiers, command) in presses {
+                let found = defaults
+                    .find_for_key_press(Some(&display), keyval, keycode, modifiers)
+                    .map(|shortcut| shortcut.definition.command);
+                assert_eq!(found, command, "{press} on {layout}");
+            }
+        }
+
+        // Secondary AZERTY layout: active XKB group disambiguates keys shared with US.
+        let layout = "us,fr";
+        let presses = vec![
+            (
+                "Ctrl+Alt+Shift+6 (fr active)",
+                Key::_6,
+                15,
+                ctrl_alt | shift,
+                Some(1),
+                Some(ActivateWorkspace6),
+            ),
+            (
+                "Ctrl+Alt+Shift+1 (fr active)",
+                Key::_1,
+                10,
+                ctrl_alt | shift,
+                Some(1),
+                Some(ActivateWorkspace1),
+            ),
+            (
+                "Ctrl+Alt+1 (fr active)",
+                Key::ampersand,
+                10,
+                ctrl_alt,
+                Some(1),
+                Some(ActivateWorkspace1),
+            ),
+            (
+                "Ctrl+Alt+Shift+0 (fr active)",
+                Key::_0,
+                19,
+                ctrl_alt | shift,
+                Some(1),
+                Some(TerminalResetFontSize),
+            ),
+            (
+                "Ctrl+Alt+- (fr active)",
+                Key::minus,
+                15,
+                ctrl_alt,
+                Some(1),
+                Some(TerminalDecreaseFontSize),
+            ),
+            (
+                "Ctrl+Alt+6 (us active)",
+                Key::_6,
+                15,
+                ctrl_alt,
+                Some(0),
+                Some(ActivateWorkspace6),
+            ),
+            (
+                "Ctrl+Alt+Shift+6 (us active)",
+                Key::asciicircum,
+                15,
+                ctrl_alt | shift,
+                Some(0),
+                None,
+            ),
+        ];
+        let status = std::process::Command::new("setxkbmap")
+            .args(["-layout", layout])
+            .status();
+        assert!(status.is_ok_and(|status| status.success()), "{layout}");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let keymap_arrived = || {
+            presses.iter().all(|(_, keyval, keycode, _, group, _)| {
+                display.map_keyval(*keyval).is_some_and(|keys| {
+                    keys.iter().any(|key| {
+                        key.keycode() == *keycode
+                            && group.is_none_or(|expected| key.group() == expected)
+                    })
+                })
+            })
+        };
+        while !keymap_arrived() && std::time::Instant::now() < until {
+            gtk4::glib::MainContext::default().iteration(false);
+        }
+        assert!(keymap_arrived(), "keymap for {layout} did not arrive");
+        for (press, keyval, keycode, modifiers, group, command) in presses {
+            let found = defaults
+                .find_for_key_press_in_group(Some(&display), keyval, keycode, modifiers, group)
+                .map(|shortcut| shortcut.definition.command);
+            assert_eq!(found, command, "{press} on {layout}");
+        }
     }
 
     #[test]
@@ -2258,8 +3028,8 @@ mod tests {
             &legacy_path,
             r#"{
                 "shortcuts": {
-                    "split_right": "<Ctrl>h",
-                    "unknown_action": "<Ctrl><Alt>u"
+                    "split_right": "<Ctrl><Alt>u",
+                    "unknown_action": "<Ctrl>x"
                 }
             }"#,
         )
@@ -2267,12 +3037,15 @@ mod tests {
 
         let resolved = load_shortcuts_or_default(&path);
 
-        assert_eq!(resolved.warnings.len(), 1);
+        assert_eq!(resolved.warnings.len(), 2);
         assert!(resolved.warnings[0].contains("unknown shortcut id `unknown_action`"));
         let migrated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap())
             .expect("migrated shortcuts config should be valid");
-        assert_eq!(migrated["shortcuts"]["split_right"], "<Ctrl>h");
-        assert!(migrated["shortcuts"].get("unknown_action").is_none());
+        assert_eq!(
+            migrated["shortcuts"],
+            serde_json::json!({ "split_right": "<Ctrl><Alt>u" }),
+            "a default that gave way is not a user choice to save"
+        );
     }
 
     #[test]
@@ -2505,12 +3278,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        write_shortcuts(&path, &resolved).unwrap();
+        write_shortcuts(&path, &resolved, &[ShortcutId::SplitRight], None).unwrap();
 
         let saved: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["appearance"]["theme"], "solarized");
         assert_eq!(saved["shortcuts"]["split_right"], "<Ctrl>h");
-        assert!(saved["shortcuts"].get("toggle_sidebar").is_none());
+        assert_eq!(saved["shortcuts"]["toggle_sidebar"], "<Ctrl><Alt>b");
     }
 
     #[test]
@@ -2522,7 +3295,7 @@ mod tests {
 
         let original = fs::read_to_string(&path).unwrap();
         let resolved = default_shortcuts();
-        let err = write_shortcuts(&path, &resolved).unwrap_err();
+        let err = write_shortcuts(&path, &resolved, &[ShortcutId::SplitRight], None).unwrap_err();
 
         assert!(matches!(
             err,
@@ -2567,21 +3340,161 @@ mod tests {
     }
 
     #[test]
-    fn resolve_shortcuts_from_str_rejects_bindings_without_ctrl_alt_or_cmd() {
-        let err = resolve_shortcuts_from_str(
+    fn resolve_shortcuts_from_str_ignores_only_the_entries_it_cannot_read() {
+        for (entry, reason) in [
+            (r#""<Shift>h""#, "use Ctrl, Alt, or Cmd with another key"),
+            (r#""<Ctrl>Control_L""#, "choose a non-modifier key"),
+            (r#""<Hyper>h""#, "unknown modifier `hyper`"),
+            ("5", "must be a string"),
+        ] {
+            let resolved = resolve_shortcuts_from_str(&format!(
+                r#"{{"shortcuts": {{"split_right": {entry}, "toggle_sidebar": "<Ctrl><Alt>b"}}}}"#
+            ))
+            .unwrap();
+
+            assert_eq!(
+                resolved.command_for_runtime_combo("ctrl+alt+d"),
+                Some(ShortcutCommand::SplitRight),
+                "{entry} must leave the default"
+            );
+            assert_eq!(
+                resolved.command_for_runtime_combo("ctrl+alt+b"),
+                Some(ShortcutCommand::ToggleSidebar),
+                "{entry} must not discard the other entry"
+            );
+            assert_eq!(resolved.warnings.len(), 1);
+            assert!(
+                resolved.warnings[0].contains("ignoring shortcut `split_right`")
+                    && resolved.warnings[0].contains(reason),
+                "{:?}",
+                resolved.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn an_override_takes_the_binding_of_another_default() {
+        let resolved = resolve_shortcuts_from_str(
+            r#"{"shortcuts": {"new_terminal": "<Ctrl><Alt>u", "split_right": "<Ctrl><Alt>h"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+alt+u"),
+            Some(ShortcutCommand::NewTerminal)
+        );
+        assert_eq!(
+            resolved.display_label_for_id(ShortcutId::NextUnreadTerminal),
+            None
+        );
+        assert_eq!(
+            resolved
+                .display_label_for_id(ShortcutId::SplitRight)
+                .as_deref(),
+            Some("Ctrl+Alt+H")
+        );
+        assert_eq!(
+            resolved.warnings,
+            ["`<Ctrl><Alt>u` is assigned to New Terminal, so Next Unread Terminal has no shortcut"]
+        );
+    }
+
+    #[test]
+    fn saving_one_shortcut_keeps_every_other_entry() {
+        let dir = tempdir().unwrap();
+        let path = shortcuts_path_in(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
             r#"{
                 "shortcuts": {
-                    "split_right": "<Shift>h"
+                    "new_terminal": "<Ctrl><Alt>u",
+                    "split_down": null,
+                    "focus_left": "<Hyper>h",
+                    "from_a_newer_build": "<Ctrl>x"
                 }
             }"#,
         )
-        .unwrap_err();
+        .unwrap();
 
+        let edited = load_shortcuts_or_default(&path)
+            .with_binding(
+                ShortcutId::ToggleSidebar,
+                Some(NormalizedShortcut::parse("<Ctrl><Alt>b").unwrap()),
+            )
+            .unwrap();
+        let saved = write_shortcuts(&path, &edited, &[ShortcutId::ToggleSidebar], None).unwrap();
+
+        assert_eq!(saved.shortcuts, edited.shortcuts);
+        let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "shortcuts": {
+                    "new_terminal": "<Ctrl><Alt>u",
+                    "split_down": null,
+                    "focus_left": "<Hyper>h",
+                    "from_a_newer_build": "<Ctrl>x",
+                    "toggle_sidebar": "<Ctrl><Alt>b"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn saving_over_conflicting_overrides_changes_nothing_until_the_conflict_is_gone() {
+        let dir = tempdir().unwrap();
+        let path = shortcuts_path_in(dir.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = r#"{"shortcuts": {"toggle_sidebar": "<Ctrl><Alt>b", "split_right": "<Ctrl><Alt>b", "focus_left": "<Alt>h"}}"#;
+        fs::write(&path, original).unwrap();
+        let loaded = load_shortcuts_or_default(&path);
+
+        let unrelated = loaded
+            .with_binding(
+                ShortcutId::FocusRight,
+                Some(NormalizedShortcut::parse("<Alt>l").unwrap()),
+            )
+            .unwrap();
+        let err = write_shortcuts(&path, &unrelated, &[ShortcutId::FocusRight], None).unwrap_err();
         assert!(matches!(
             err,
-            ShortcutConfigError::BaseModifierRequired { shortcut_id, .. }
-                if shortcut_id == "split_right"
+            ShortcutConfigWriteError::InvalidShortcuts(
+                ShortcutConfigError::DuplicateBinding { .. }
+            )
         ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        let resolved = loaded
+            .with_binding(
+                ShortcutId::SplitRight,
+                Some(NormalizedShortcut::parse("<Ctrl><Alt>h").unwrap()),
+            )
+            .unwrap();
+        let saved = write_shortcuts(&path, &resolved, &[ShortcutId::SplitRight], None).unwrap();
+        assert_eq!(
+            saved.display_label_for_id(ShortcutId::FocusLeft).as_deref(),
+            Some("Alt+H"),
+            "the overrides apply again once they no longer conflict"
+        );
+    }
+
+    #[test]
+    fn duplicate_error_names_the_current_owner_first() {
+        // Rows before and after the owner of Ctrl+Alt+N.
+        for id in [ShortcutId::NewWorkspace, ShortcutId::SplitRight] {
+            let err = default_shortcuts()
+                .with_binding(id, Some(NormalizedShortcut::parse("<Ctrl><Alt>n").unwrap()))
+                .unwrap_err();
+            assert_eq!(
+                err,
+                ShortcutConfigError::DuplicateBinding {
+                    first: ShortcutId::NewInstance,
+                    second: id,
+                    accel: "<Ctrl><Alt>n".to_string(),
+                }
+            );
+        }
     }
 
     #[test]
@@ -2637,24 +3550,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_shortcuts_from_str_rejects_modifier_only_keys() {
-        let err = resolve_shortcuts_from_str(
-            r#"{
-                "shortcuts": {
-                    "split_right": "<Ctrl>Control_L"
-                }
-            }"#,
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            err,
-            ShortcutConfigError::ModifierOnlyBinding { shortcut_id, .. }
-                if shortcut_id == "split_right"
-        ));
-    }
-
-    #[test]
     fn write_shortcuts_omits_defaults_and_preserves_unrelated_settings() {
         let dir = tempdir().unwrap();
         let path = shortcuts_path_in(dir.path());
@@ -2680,7 +3575,13 @@ mod tests {
         )
         .unwrap();
 
-        write_shortcuts(&path, &updated).unwrap();
+        write_shortcuts(
+            &path,
+            &updated,
+            &[ShortcutId::SplitRight, ShortcutId::CloseFocusedPane],
+            None,
+        )
+        .unwrap();
 
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -2709,7 +3610,7 @@ mod tests {
         )
         .unwrap();
 
-        write_shortcuts(&path, &default_shortcuts()).unwrap();
+        write_shortcuts(&path, &default_shortcuts(), &[ShortcutId::SplitRight], None).unwrap();
 
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -2808,6 +3709,7 @@ mod tests {
                 gdk::Key::a,
                 38,
                 gdk::ModifierType::empty(),
+                None,
             )
             .is_none());
         assert!(!display_called);

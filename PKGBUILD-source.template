@@ -17,7 +17,7 @@ _ghostty_commit=@@GHOSTTY_COMMIT@@
 _zig_version=0.16.0
 source=(
     "$pkgname-$pkgver::git+@@SOURCE_REPOSITORY@@#commit=$_limux_commit"
-    "ghostty-$pkgver::git+https://github.com/bvolpato/ghostty.git#commit=$_ghostty_commit"
+    "ghostty-$pkgver::git+@@GHOSTTY_REPOSITORY@@#commit=$_ghostty_commit"
 )
 source_x86_64=("zig-x86_64-linux-$_zig_version.tar.xz::https://ziglang.org/download/$_zig_version/zig-x86_64-linux-$_zig_version.tar.xz")
 source_aarch64=("zig-aarch64-linux-$_zig_version.tar.xz::https://ziglang.org/download/$_zig_version/zig-aarch64-linux-$_zig_version.tar.xz")

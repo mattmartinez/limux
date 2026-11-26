@@ -20,8 +20,8 @@ bvolpato/ghostty, at the branch `osc7501-program-status`: four commits on top of
 Ghostty pin that add OSC 7501 program status (upstream Ghostty's parser and cmux's embedder
 support, both taken from manaflow-ai/ghostty, plus a fix for Zig 0.16). They change Ghostty's
 action ABI, so the Rust bindings on `main` need them. Inside `ghostty/`, `origin` is
-bvolpato/ghostty and `mattmartinez` is the fork. Upstream's release templates
-(`PKGBUILD-source.template`, `flatpak/`) still name bvolpato/ghostty; this fork does not use them.
+bvolpato/ghostty and `mattmartinez` is the fork. AUR source validation reads the repository URL
+and pin from the source commit; the unused Flatpak manifest still names bvolpato/ghostty.
 
 When upstream moves its Ghostty pin, the merge stops on the `ghostty` pointer. Rebase the four
 commits onto upstream's new pin inside `ghostty/`, rebuild with `scripts/build-ghostty.sh`,

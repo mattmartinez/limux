@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +26,8 @@ const UNKNOWN_METHOD_CODE: i64 = -32601;
 const INTERNAL_ERROR_CODE: i64 = -32603;
 const NOT_FOUND_CODE: i64 = -32004;
 const CONFLICT_CODE: i64 = -32009;
+
+const REPLY_DEADLINE: Duration = Duration::from_secs(5);
 
 pub(crate) type BridgeResult = Result<Value, BridgeError>;
 
@@ -334,6 +336,49 @@ pub enum ControlCommand {
 }
 
 impl ControlCommand {
+    /// The workspace this request acts on. Group requests take handles only.
+    pub fn workspace_target(&self) -> Option<&WorkspaceTarget> {
+        match self {
+            Self::CreatePane { request, .. } => Some(&request.target),
+            Self::ListPanes { target, .. }
+            | Self::ListPaneSurfaces { target, .. }
+            | Self::SwapPanes { target, .. }
+            | Self::BreakPane { target, .. }
+            | Self::JoinPane { target, .. }
+            | Self::LastPane { target, .. }
+            | Self::ResizePane { target, .. }
+            | Self::ListSurfaces { target, .. }
+            | Self::SurfaceHealth { target, .. }
+            | Self::ReadSurfaceText { target, .. }
+            | Self::ClearSurfaceHistory { target, .. }
+            | Self::SelectWorkspace { target, .. }
+            | Self::RenameWorkspace { target, .. }
+            | Self::SetWorkspaceColor { target, .. }
+            | Self::WorkspaceCard { target, .. }
+            | Self::CloseWorkspace { target, .. }
+            | Self::SendText { target, .. }
+            | Self::SendKey { target, .. }
+            | Self::CreateSurface { target, .. }
+            | Self::CloseSurface { target, .. }
+            | Self::FocusSurface { target, .. }
+            | Self::FocusPane { target, .. }
+            | Self::TabAction { target, .. }
+            | Self::BrowserOpenSplit { target, .. }
+            | Self::BrowserAction { target, .. }
+            | Self::CreateNotification { target, .. } => Some(target),
+            Self::Identify { .. }
+            | Self::ActivateWindow { .. }
+            | Self::SaveSession { .. }
+            | Self::CurrentWorkspace { .. }
+            | Self::ListWorkspaces { .. }
+            | Self::CreateWorkspace { .. }
+            | Self::RelativeWorkspace { .. }
+            | Self::LastWorkspace { .. }
+            | Self::WorkspaceGroup { .. }
+            | Self::GuiHook { .. } => None,
+        }
+    }
+
     pub fn respond(self, result: BridgeResult) {
         match self {
             Self::Identify { reply, .. }
@@ -577,6 +622,26 @@ fn parse_lifecycle_workspace_target(
     parse_optional_workspace_target(params, true)
 }
 
+/// The workspace to change. An empty or null id, such as an unset shell variable,
+/// must not become the active workspace, and neither must a name, which these
+/// requests do not resolve. `workspace.rename` takes its title as `name`.
+fn parse_changed_workspace_target(
+    params: &Map<String, Value>,
+    method: &str,
+) -> Result<WorkspaceTarget, BridgeError> {
+    optional_explicit_handle(params, &["workspace_id", "id"], "workspace:")?;
+    let target = parse_optional_workspace_target(params, false)?;
+    if target == WorkspaceTarget::Active
+        && method != "workspace.rename"
+        && params.contains_key("name")
+    {
+        return Err(BridgeError::invalid_params(format!(
+            "{method} takes workspace_id/id or index, not name"
+        )));
+    }
+    Ok(target)
+}
+
 fn optional_tab_handle(params: &Map<String, Value>) -> Result<Option<String>, BridgeError> {
     let mut selected = None;
     for key in ["surface_id", "tab_id"] {
@@ -663,22 +728,24 @@ fn parse_surface_kind(params: &Map<String, Value>) -> Result<(bool, Option<Strin
 
 fn looks_like_workspace_handle(raw: &str) -> bool {
     let raw = raw.trim();
-    if raw.starts_with("workspace:") {
-        return true;
-    }
-    let value = raw;
-    uuid::Uuid::parse_str(value).is_ok() || value.chars().all(|ch| ch.is_ascii_digit())
+    raw.starts_with("workspace:") || uuid::Uuid::parse_str(raw).is_ok()
 }
 
 fn parse_optional_workspace_target(
     params: &Map<String, Value>,
     allow_name: bool,
 ) -> Result<WorkspaceTarget, BridgeError> {
-    if let Some(handle) = optional_handle(params, &["workspace_id", "id"])? {
-        if allow_name && !looks_like_workspace_handle(&handle) {
-            return Ok(WorkspaceTarget::Name(handle));
-        }
-        return Ok(WorkspaceTarget::Handle(handle));
+    for key in ["workspace_id", "id"] {
+        let Some(handle) = optional_handle(params, &[key])? else {
+            continue;
+        };
+        // A JSON number is an id. Digits in a string are a name.
+        let is_handle = params[key].is_number() || looks_like_workspace_handle(&handle);
+        return Ok(if allow_name && !is_handle {
+            WorkspaceTarget::Name(handle)
+        } else {
+            WorkspaceTarget::Handle(handle)
+        });
     }
     if allow_name {
         if let Some(name) = optional_string(params, &["name"]) {
@@ -834,7 +901,7 @@ fn parse_group_request(
                 Some(Value::Null) => None,
                 Some(_) => Some(required_group(params, method)?),
             };
-            let target = parse_optional_workspace_target(params, false)?;
+            let target = parse_changed_workspace_target(params, method)?;
             Ok(GroupRequest::SetWorkspaceGroup { target, group })
         }
         _ => Err(BridgeError::new(
@@ -1005,11 +1072,61 @@ fn parse_required_workspace_target(
     }
 }
 
+/// How far a queued command got, shared by the connection that waits for its
+/// reply and the GTK loop that runs it. A caller that was told the command
+/// timed out may send it again, so a command must not start after that.
+#[derive(Default)]
+struct Delivery(AtomicU8);
+
+impl Delivery {
+    const QUEUED: u8 = 0;
+    const STARTED: u8 = 1;
+    const CANCELLED: u8 = 2;
+
+    /// Claim the command to run it. False once its caller gave up.
+    fn start(&self) -> bool {
+        self.leave_queue(Self::STARTED)
+    }
+
+    /// Give up on the command. False if it already started.
+    fn cancel(&self) -> bool {
+        self.leave_queue(Self::CANCELLED)
+    }
+
+    fn leave_queue(&self, next: u8) -> bool {
+        self.0
+            .compare_exchange(Self::QUEUED, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+/// Queues a command for the GTK loop, which must claim it before running it.
+type Dispatch<'a> = dyn Fn(ControlCommand, &Arc<Delivery>) + 'a;
+
+fn await_reply(
+    id: Option<Value>,
+    reply: &mpsc::Receiver<BridgeResult>,
+    delivery: &Delivery,
+    deadline: Duration,
+) -> V2Response {
+    match reply.recv_timeout(deadline) {
+        Ok(Ok(result)) => V2Response::success(id, result),
+        Ok(Err(error)) => error_response(id, error),
+        Err(_) if delivery.cancel() => {
+            error_response(id, BridgeError::internal("control command timed out"))
+        }
+        Err(_) => error_response(
+            id,
+            BridgeError::internal("control command timed out; it may still complete"),
+        ),
+    }
+}
+
 fn handle_method(
     id: Option<Value>,
     method: &str,
     params: Value,
-    dispatch: &dyn Fn(ControlCommand),
+    dispatch: &Dispatch<'_>,
 ) -> V2Response {
     let method = limux_protocol::methods::canonical_wire_method_name(method).unwrap_or(method);
     let params = match params_object(&params) {
@@ -1371,7 +1488,7 @@ fn handle_method(
                     BridgeError::invalid_params("workspace.rename requires title/name"),
                 );
             };
-            let target = match parse_optional_workspace_target(params, false) {
+            let target = match parse_changed_workspace_target(params, method) {
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
@@ -1390,7 +1507,7 @@ fn handle_method(
                 Ok(color) => color,
                 Err(error) => return error_response(id, error),
             };
-            let target = match parse_optional_workspace_target(params, false) {
+            let target = match parse_changed_workspace_target(params, method) {
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
@@ -1449,7 +1566,7 @@ fn handle_method(
             (ControlCommand::GuiHook { request, reply }, rx)
         }
         "workspace.close" => {
-            let target = match parse_optional_workspace_target(params, false) {
+            let target = match parse_changed_workspace_target(params, method) {
                 Ok(target) => target,
                 Err(error) => return error_response(id, error),
             };
@@ -1738,30 +1855,23 @@ fn handle_method(
 
     let (command, reply_rx) = queued;
 
-    dispatch(command);
-
-    match reply_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(result)) => V2Response::success(id, result),
-        Ok(Err(error)) => error_response(id, error),
-        Err(_) => error_response(id, BridgeError::internal("control command timed out")),
-    }
+    let delivery = Arc::new(Delivery::default());
+    dispatch(command, &delivery);
+    await_reply(id, &reply_rx, &delivery, REPLY_DEADLINE)
 }
 
 fn error_response(id: Option<Value>, error: BridgeError) -> V2Response {
     V2Response::error(id, error.code, error.message, error.data)
 }
 
-fn dispatch_request(input: &str, dispatch: &dyn Fn(ControlCommand)) -> V2Response {
+fn dispatch_request(input: &str, dispatch: &Dispatch<'_>) -> V2Response {
     match parse_request(input) {
         Ok(request) => handle_method(request.id, &request.method, request.params, dispatch),
         Err(error) => error_response(None, error),
     }
 }
 
-fn handle_client(
-    stream: UnixStream,
-    dispatch: &(dyn Fn(ControlCommand) + Send + Sync + 'static),
-) -> io::Result<()> {
+fn handle_client(stream: UnixStream, dispatch: &Dispatch<'_>) -> io::Result<()> {
     stream.set_read_timeout(Some(request_io::CLIENT_IDLE_TIMEOUT))?;
     let reader_stream = stream.try_clone()?;
     reader_stream.set_read_timeout(Some(request_io::CLIENT_IDLE_TIMEOUT))?;
@@ -1839,12 +1949,16 @@ fn command_needs_browser_sandbox(command: &ControlCommand) -> bool {
 /// command onto the GTK main context.
 pub fn start(dispatch: fn(ControlCommand)) {
     let context = glib::MainContext::default();
-    let dispatch = std::sync::Arc::new(move |command: ControlCommand| {
+    let dispatch = Arc::new(move |command: ControlCommand, delivery: &Arc<Delivery>| {
         let needs_browser_sandbox = command_needs_browser_sandbox(&command);
         if needs_browser_sandbox {
             let _ = crate::browser_sandbox::wait_for_availability_blocking();
         }
+        let delivery = delivery.clone();
         context.invoke(move || {
+            if !delivery.start() {
+                return;
+            }
             if needs_browser_sandbox {
                 crate::browser_sandbox::flush_ready_waiters();
             }
@@ -1856,7 +1970,7 @@ pub fn start(dispatch: fn(ControlCommand)) {
         .name("limux-control".into())
         .spawn(move || {
             let path = resolve_socket_path(None, SocketMode::Runtime);
-            let control_mode = SocketControlMode::from_env();
+            let control_mode = SocketControlMode::from_env_for_server();
             let listener = match bind_listener(
                 &path,
                 SocketMode::Runtime,
@@ -1921,6 +2035,39 @@ pub fn start(dispatch: fn(ControlCommand)) {
 mod tests {
     use super::*;
     use std::io::BufRead;
+
+    fn dispatch_request(input: &str, dispatch: &dyn Fn(ControlCommand)) -> V2Response {
+        super::dispatch_request(input, &|command, _| dispatch(command))
+    }
+
+    fn handle_client(stream: UnixStream, dispatch: &dyn Fn(ControlCommand)) -> io::Result<()> {
+        super::handle_client(stream, &|command, _| dispatch(command))
+    }
+
+    fn timed_out_message(delivery: &Delivery) -> String {
+        let (_reply, reply_rx) = mpsc::channel();
+        let response = await_reply(None, &reply_rx, delivery, Duration::from_millis(1));
+        let error = response.error.expect("no reply was sent");
+        assert_eq!(error.code, INTERNAL_ERROR_CODE);
+        error.message
+    }
+
+    #[test]
+    fn a_command_whose_caller_timed_out_does_not_start_later() {
+        let delivery = Delivery::default();
+        assert_eq!(timed_out_message(&delivery), "control command timed out");
+        assert!(!delivery.start());
+    }
+
+    #[test]
+    fn a_command_that_started_before_the_deadline_is_not_reported_as_cancelled() {
+        let delivery = Delivery::default();
+        assert!(delivery.start());
+        assert_eq!(
+            timed_out_message(&delivery),
+            "control command timed out; it may still complete"
+        );
+    }
 
     #[test]
     fn parses_v2_request_directly() {
@@ -2122,6 +2269,20 @@ mod tests {
             parse_optional_workspace_target(params.as_object().expect("object params"), true)
                 .expect("target should parse");
         assert_eq!(target, WorkspaceTarget::Name("claude".to_string()));
+    }
+
+    #[test]
+    fn workspace_target_treats_digits_in_a_string_as_a_name() {
+        for (value, expected) in [
+            (json!("2024"), WorkspaceTarget::Name("2024".to_string())),
+            (json!(2024), WorkspaceTarget::Handle("2024".to_string())),
+        ] {
+            let params = json!({ "workspace_id": value });
+            let target =
+                parse_optional_workspace_target(params.as_object().expect("object params"), true)
+                    .expect("target should parse");
+            assert_eq!(target, expected);
+        }
     }
 
     #[test]
@@ -2750,6 +2911,54 @@ mod tests {
             response.error.as_ref().map(|error| error.code),
             Some(INVALID_PARAMS_CODE)
         );
+    }
+
+    #[test]
+    fn workspace_changes_reject_unusable_targets_before_dispatch() {
+        for method in [
+            "workspace.close",
+            "workspace.rename",
+            "workspace.set_color",
+            "workspace.set_group",
+        ] {
+            let mut unusable = vec![
+                ("workspace_id", json!(" ")),
+                ("workspace_id", Value::Null),
+                ("workspace_id", json!("workspace:")),
+                ("id", json!(" ")),
+                ("id", Value::Null),
+            ];
+            if method != "workspace.rename" {
+                unusable.push(("name", json!("other")));
+            }
+            for (key, value) in unusable {
+                let mut params = json!({ "title": "t", "color": "blue", "group_id": "g" });
+                params[key] = value;
+                let response = dispatch_request(
+                    &json!({ "method": method, "params": params }).to_string(),
+                    &|command| panic!("unusable target dispatched: {command:?}"),
+                );
+                assert_eq!(
+                    response.error.map(|error| error.code),
+                    Some(INVALID_PARAMS_CODE),
+                    "{method} {params}"
+                );
+            }
+        }
+
+        // The title of a rename is not a target.
+        let response = dispatch_request(
+            r#"{"method":"workspace.rename","params":{"name":"title"}}"#,
+            &|command| match command {
+                ControlCommand::RenameWorkspace {
+                    target: WorkspaceTarget::Active,
+                    title,
+                    reply,
+                } if title == "title" => reply.send(Ok(json!({}))).unwrap(),
+                other => panic!("unexpected command: {other:?}"),
+            },
+        );
+        assert_eq!(response.error, None);
     }
 
     #[test]
