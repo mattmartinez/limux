@@ -95,6 +95,7 @@ fn installed_claude_hooks_distinguish_notifications_from_completion() {
         let params = notification_params(command, &socket, json!({"hook_event_name": event}));
         assert_eq!(params["title"], title, "installed {event} hook");
         assert_eq!(params["body"], body, "installed {event} hook");
+        assert_eq!(params["sidebar_preview"], false, "installed {event} hook");
     }
 }
 
@@ -113,4 +114,31 @@ fn legacy_claude_stop_route_respects_notification_payload_and_explicit_event() {
         let params = notification_params(command, &socket, json!({"hook_event_name": event}));
         assert_eq!(params["title"], title);
     }
+}
+
+#[test]
+fn claude_idle_reminder_does_not_create_an_alert_or_status_update() {
+    let home = tempfile::tempdir().unwrap();
+    let socket = home.path().join("hook.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = private_command(env!("CARGO_BIN_EXE_limux-cli"), home.path(), &socket)
+        .env("LIMUX_WORKSPACE_ID", "workspace-a")
+        .env("LIMUX_SURFACE_ID", "1:tab-a")
+        .args(["--json", "hooks", "claude", "notification"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#)
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

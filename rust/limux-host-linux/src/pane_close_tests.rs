@@ -749,13 +749,13 @@ fn tab_unread_changes_preserve_independent_workspace_notifications() {
         pane_id: None,
         tab_id: None,
     };
-    mark_workspace_unread_with_message(&state, &ws_id, "Workspace notice", false, target);
+    mark_workspace_unread_with_message(&state, &ws_id, "Workspace notice", false, target, true);
     let target = DesktopNotificationTarget {
         workspace_id: ws_id.clone(),
         pane_id: Some(surface.pane_id),
         tab_id: Some(surface.tab_id.clone()),
     };
-    mark_workspace_unread_with_message(&state, &ws_id, "Tab notice", false, target);
+    mark_workspace_unread_with_message(&state, &ws_id, "Tab notice", false, target, true);
     assert!(pane::workspace_has_unread_tabs(&ws_id));
     assert!(handle.send_text("exit"));
     assert!(handle.send_key("enter"));

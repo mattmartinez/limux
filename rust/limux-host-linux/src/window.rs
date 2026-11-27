@@ -4594,7 +4594,7 @@ fn render_workspace_card(workspace: &Workspace) {
             status_box.remove(&child);
         }
     }
-    for entry in workspace.statuses.sorted() {
+    for entry in workspace.statuses.displayed() {
         let label = gtk::Label::builder()
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -7550,6 +7550,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             title,
             subtitle,
             body,
+            sidebar_preview,
             reply,
         } => {
             // A notification lands on its source tab in any workspace, the
@@ -7603,9 +7604,14 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 pane_id: tab_target.as_ref().map(|(pane_id, _)| *pane_id),
                 tab_id: tab_target.map(|(_, tab_id)| tab_id),
             };
-            if let Some(request) =
-                mark_workspace_unread_with_message(state, &ws_id, &message, source_focused, target)
-            {
+            if let Some(request) = mark_workspace_unread_with_message(
+                state,
+                &ws_id,
+                &message,
+                source_focused,
+                target,
+                sidebar_preview,
+            ) {
                 show_desktop_notification(state, request);
             }
 
@@ -8599,6 +8605,9 @@ pub(crate) fn create_pane_for_workspace(
         }),
         on_desktop_notification: Box::new(
             move |title: &str, body: &str, source_focused: bool, pane_id: u32, tab_id: &str| {
+                if is_passive_agent_notification(title, body) {
+                    return;
+                }
                 let state = state_for_desktop_notification.clone();
                 let ws_id = ws_id_desktop_notification.clone();
                 let tab_id = tab_id.to_string();
@@ -8615,6 +8624,7 @@ pub(crate) fn create_pane_for_workspace(
                         &message,
                         source_focused,
                         target,
+                        true,
                     ) {
                         show_desktop_notification(&state, request);
                     }
@@ -8795,8 +8805,9 @@ pub(crate) fn create_pane_for_workspace(
                                     )
                             })
                     };
-                    let request =
-                        mark_workspace_unread_with_message(&state, &ws_id, &message, shown, target);
+                    let request = mark_workspace_unread_with_message(
+                        &state, &ws_id, &message, shown, target, true,
+                    );
                     if let Some(request) = request.filter(|_| failed) {
                         show_desktop_notification(&state, request);
                     }

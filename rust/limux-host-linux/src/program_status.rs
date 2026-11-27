@@ -232,6 +232,7 @@ impl Store {
                 icon: Some(icon.to_string()),
                 color: (record.state == State::Blocked).then(|| BLOCKED_COLOR.to_string()),
                 priority: urgency(record.state),
+                agent_activity: true,
             },
             record.order,
         ))

@@ -75,7 +75,14 @@ Limits, in `workspace_card.rs`: 16 rows, key 32 chars, value 160, description 20
 
 Status rows are not persisted. `description` is, on `WorkspaceState`. `named_by_user` is too.
 
-Hooks (`limux hooks setup`) write a row under the agent's own key: Running on submit, Needs input on notification, Idle when the turn ends, removed when the session ends, then background `refresh-pr`. Opt out: `LIMUX_CARD_STATUS_DISABLED=1`, `LIMUX_PR_STATUS_DISABLED=1`.
+Hooks (`limux hooks setup`) write fallback Running or Needs input rows, then
+clear them when the turn or session ends. The card shows one built-in activity
+line, preferring OSC 7501 unless a hook has a more urgent request for input.
+User-written statuses and PRs stay visible. Hook notifications retain the
+unread marker and desktop alert but skip the card preview. Ignore Claude's
+passive idle prompt, not real permission alerts.
+Hooks refresh PRs after a turn. Opt out: `LIMUX_CARD_STATUS_DISABLED=1`,
+`LIMUX_PR_STATUS_DISABLED=1`.
 
 ### Titles follow the focused tab
 

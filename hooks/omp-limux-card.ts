@@ -11,7 +11,7 @@
 // file: omp reports it over OSC 7501 and Limux shows it as the card's
 // `omp · Working` row, the way cmux does.
 //
-// Opt out of restore tracking with LIMUX_OMP_HOOKS_DISABLED=1, or of card
+// Opt out of restore tracking with LIMUX_OMP_HOOKS_DISABLED=1, or of turn
 // notifications with LIMUX_OMP_CARD_DISABLED=1. Calls are time-bounded.
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -138,7 +138,9 @@ export default function limuxCardExtension(api: ExtensionAPI) {
     // messages, background jobs) with willContinue; it is still running then.
     if ((event as { willContinue?: unknown }).willContinue === true) return;
     const reply = lastAssistantText(event);
-    await limux(["notify", "--body", oneLine(reply ?? "turn complete"), "omp finished"]);
+    await limux([
+      "notify", "--no-sidebar-preview", "--body", oneLine(reply ?? "turn complete"), "omp finished",
+    ]);
     const cwd = firstString(ctx.cwd, process.cwd()) ?? process.cwd();
     await limux(["refresh-pr", "--cwd", cwd], { detach: true });
   });

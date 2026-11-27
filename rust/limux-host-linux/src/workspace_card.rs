@@ -51,6 +51,9 @@ pub struct StatusEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     pub priority: i64,
+    /// Built-in lifecycle and OSC rows compete for one activity line.
+    #[serde(skip)]
+    pub agent_activity: bool,
 }
 
 /// The status rows of one workspace, keyed by status key.
@@ -94,6 +97,25 @@ impl StatusMap {
         let mut rows: Vec<&StatusEntry> = self.entries.values().collect();
         rows.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.key.cmp(&b.key)));
         rows
+    }
+
+    pub fn displayed(&self) -> impl Iterator<Item = &StatusEntry> {
+        let blocked = crate::program_status::urgency(crate::program_status::State::Blocked);
+        let activity = self
+            .entries
+            .values()
+            .filter(|entry| entry.agent_activity)
+            .max_by_key(|entry| {
+                (
+                    entry.priority >= blocked,
+                    entry.key == crate::program_status::STATUS_KEY,
+                    entry.priority,
+                )
+            })
+            .map(|entry| entry.key.as_str());
+        self.sorted()
+            .into_iter()
+            .filter(move |entry| !entry.agent_activity || Some(entry.key.as_str()) == activity)
     }
 
     pub fn to_json(&self) -> serde_json::Value {
@@ -154,6 +176,10 @@ pub fn parse_card_request(
                 icon,
                 color,
                 priority,
+                agent_activity: params
+                    .get("agent_activity")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             }))
         }
         "workspace.clear_status" => {
@@ -487,6 +513,7 @@ mod tests {
             icon: None,
             color: None,
             priority,
+            agent_activity: false,
         }
     }
 
@@ -505,6 +532,7 @@ mod tests {
                 icon: Some("\u{26A1}".into()),
                 color: Some("#4c8dff".into()),
                 priority: 5,
+                agent_activity: false,
             })
         );
     }
@@ -598,6 +626,46 @@ mod tests {
     }
 
     #[test]
+    fn card_prefers_one_osc_activity_row_and_keeps_custom_statuses() {
+        let mut map = StatusMap::default();
+        map.set(StatusEntry {
+            agent_activity: true,
+            ..entry("claude", 2)
+        })
+        .unwrap();
+        map.set(StatusEntry {
+            agent_activity: true,
+            ..entry(crate::program_status::STATUS_KEY, 2)
+        })
+        .unwrap();
+        map.set(entry("build", 20)).unwrap();
+        map.set(entry("pr", -1)).unwrap();
+        let keys = |map: &StatusMap| {
+            map.displayed()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(&map),
+            ["build", crate::program_status::STATUS_KEY, "pr"]
+        );
+        map.clear(Some(crate::program_status::STATUS_KEY));
+        assert_eq!(keys(&map), ["build", "claude", "pr"]);
+        map.set(StatusEntry {
+            agent_activity: true,
+            ..entry(crate::program_status::STATUS_KEY, 2)
+        })
+        .unwrap();
+        // A permission hook still wins over a different program that's working.
+        map.set(StatusEntry {
+            agent_activity: true,
+            ..entry("claude", 4)
+        })
+        .unwrap();
+        assert_eq!(keys(&map), ["build", "claude", "pr"]);
+    }
+
+    #[test]
     fn row_count_is_capped_but_replacing_is_allowed() {
         let mut map = StatusMap::default();
         for i in 0..MAX_STATUS_ENTRIES {
@@ -615,6 +683,7 @@ mod tests {
             icon: Some("<b>".into()),
             color: Some("#e5484d".into()),
             priority: 0,
+            agent_activity: false,
         };
         let markup = status_row_markup(&row);
         assert_eq!(

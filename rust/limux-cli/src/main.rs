@@ -356,7 +356,7 @@ tmux-compatible commands:
   popup | bind-key | unbind-key | copy-mode (not supported)
 
 Agent integrations:
-  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] [--osc] <title>
+  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] [--no-sidebar-preview] [--osc] <title>
   hooks setup [agent] [--osc] | hooks uninstall [agent] | hooks snapshot [agent] [--dry-run] [--save-session] [--all-sockets] | hooks <agent> <event>
   claude-hook | opencode-hook | gemini-hook | agy-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]
   agent-team [--agents codex,claude[,opencode,gemini,agy]] [--cwd <path>] [--no-launch] [--dry-run]
@@ -1124,7 +1124,7 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
             "--body",
             "--message",
         ],
-        &["--osc"],
+        &["--no-sidebar-preview", "--osc"],
     );
     let (workspace, surface) = notification_scope(&args, env_opt);
 
@@ -1142,6 +1142,9 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
 
     let mut params = Map::new();
     params.insert("title".to_string(), Value::String(title));
+    if parse_flag(&args, "--no-sidebar-preview") {
+        params.insert("sidebar_preview".to_string(), Value::Bool(false));
+    }
     if !subtitle.is_empty() {
         params.insert("subtitle".to_string(), Value::String(subtitle));
     }
@@ -1225,6 +1228,18 @@ fn agy_stop_notification(payload: &Value) -> Option<(String, String)> {
     Some((title.to_string(), body.to_owned()))
 }
 
+fn agent_card_event<'a>(agent: agent_hooks::AgentKind, event: &'a str, payload: &Value) -> &'a str {
+    // Claude's idle_prompt is a timer, not a permission request or a question.
+    if agent == agent_hooks::AgentKind::Claude
+        && matches!(event, "Notification" | "notification")
+        && hook_str(payload, &["notification_type"]) == Some("idle_prompt")
+    {
+        "IdlePrompt"
+    } else {
+        event
+    }
+}
+
 fn agent_hook_notification(
     agent: agent_hooks::AgentKind,
     event: &str,
@@ -1253,7 +1268,7 @@ fn agent_hook_notification(
         "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
         | "prompt-submit" | "PreInvocation" | "pre-invocation" | "PostInvocation"
         | "post-invocation" | "PreToolUse" | "PostToolUse" | "SubagentStop" | "subagent-stop"
-        | "Cleanup" | "cleanup" | "restore-exit" | "restore-session" => None,
+        | "Cleanup" | "cleanup" | "restore-exit" | "restore-session" | "IdlePrompt" => None,
         other => Some((
             format!("{agent_label}: {other}"),
             hook_str(payload, &["message", "summary"])
@@ -1299,7 +1314,8 @@ async fn run_agent_hook(
 
     // Build a human-friendly title + body depending on event + agent.
     persist_agent_hook_session(agent, args, &payload, &event)?;
-    let notification_title_body = agent_hook_notification(agent, &event, &payload);
+    let card_event = agent_card_event(agent, &event, &payload);
+    let notification_title_body = agent_hook_notification(agent, card_event, &payload);
 
     if let Some((title, body)) = notification_title_body {
         let subtitle = hook_str(
@@ -1316,6 +1332,9 @@ async fn run_agent_hook(
 
         let mut params = Map::new();
         params.insert("title".to_string(), Value::String(title));
+        // The card already has one activity line. Keep the desktop notification
+        // and unread marker without adding another summary beneath the title.
+        params.insert("sidebar_preview".to_string(), Value::Bool(false));
         if !subtitle.is_empty() {
             params.insert("subtitle".to_string(), Value::String(subtitle));
         }
@@ -1333,7 +1352,7 @@ async fn run_agent_hook(
         }
     }
 
-    update_agent_card(client, agent, args, &payload, &event).await;
+    update_agent_card(client, agent, args, &payload, card_event).await;
 
     Ok(agent_hook_output(agent, &event, &payload))
 }

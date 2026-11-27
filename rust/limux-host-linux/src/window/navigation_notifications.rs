@@ -568,6 +568,7 @@ pub(super) fn mark_workspace_unread(
         "Process needs attention",
         source_focused,
         target,
+        true,
     )
 }
 
@@ -582,12 +583,19 @@ pub(super) fn workspace_notification_message(title: &str, body: &str) -> String 
     }
 }
 
+/// Claude Code also sends its passive idle reminder as a terminal notification.
+pub(super) fn is_passive_agent_notification(title: &str, body: &str) -> bool {
+    title.trim() == "Claude Code"
+        && body.trim().trim_end_matches('.') == "Claude is waiting for your input"
+}
+
 pub(super) fn mark_workspace_unread_with_message(
     state: &State,
     ws_id: &str,
     message: &str,
     source_focused: bool,
     target: DesktopNotificationTarget,
+    sidebar_preview: bool,
 ) -> Option<DesktopNotificationRequest> {
     let (workspace_idx, active_idx, workspace_name, window_active, notifications) = {
         let s = state.borrow();
@@ -637,8 +645,10 @@ pub(super) fn mark_workspace_unread_with_message(
                 .find(|workspace| workspace.id == ws_id)
             {
                 workspace.unread |= mark_workspace_level;
-                workspace.notify_label.set_label(message);
-                workspace.notify_label.set_visible(!message.is_empty());
+                if sidebar_preview {
+                    workspace.notify_label.set_label(message);
+                    workspace.notify_label.set_visible(!message.is_empty());
+                }
             }
             drop(s);
             sync_workspace_unread(state, ws_id);

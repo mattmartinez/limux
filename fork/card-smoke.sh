@@ -118,13 +118,16 @@ check "bad key is refused" "! cli set-status --workspace '$WS2' 'bad key' v >/de
 shot 04-escaped
 cli clear-status --workspace "$WS2" evil >/dev/null
 
-# the hook path: a Claude Stop event from inside the workspace sets Idle
-echo '{"hook_event_name":"Stop","session_id":"smoke-1","cwd":"'"$REPO"'"}' |
-  LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" LIMUX_PR_STATUS_DISABLED=1 "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude stop >/dev/null 2>&1
-check "Claude Stop hook sets the claude row to Idle" "[ \"\$(cli --json list-status --workspace '$WS2' | jq -r '.statuses[] | select(.key==\"claude\") | .value')\" = Idle ]"
+# The hook path: finishing a turn removes the fallback before showing any OSC completion.
 echo '{"hook_event_name":"UserPromptSubmit","session_id":"smoke-1","prompt":"go"}' |
   LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude prompt-submit >/dev/null 2>&1
 check "prompt submit sets Running" "[ \"\$(cli --json list-status --workspace '$WS2' | jq -r '.statuses[] | select(.key==\"claude\") | .value')\" = Running ]"
+echo '{"hook_event_name":"Stop","session_id":"smoke-1","cwd":"'"$REPO"'"}' |
+  LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" LIMUX_PR_STATUS_DISABLED=1 "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude stop >/dev/null 2>&1
+check "Claude Stop removes the fallback row instead of replacing it with Idle" "[ \"\$(cli --json list-status --workspace '$WS2' | jq '[.statuses[] | select(.key==\"claude\")] | length')\" = 0 ]"
+echo '{"hook_event_name":"Notification","notification_type":"permission_prompt","session_id":"smoke-1"}' |
+  LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude notification >/dev/null 2>&1
+check "a permission prompt still shows Needs input without OSC status" "[ \"\$(cli --json list-status --workspace '$WS2' | jq -r '.statuses[] | select(.key==\"claude\") | .value')\" = 'Needs input' ]"
 echo '{"hook_event_name":"SessionEnd","session_id":"smoke-1"}' |
   LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude session-end >/dev/null 2>&1
 check "session end removes the claude row" "[ \"\$(cli --json list-status --workspace '$WS2' | jq '[.statuses[] | select(.key==\"claude\")] | length')\" = 0 ]"

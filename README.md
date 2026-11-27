@@ -334,8 +334,10 @@ limux refresh-pr
   `pause.circle.fill`, `bell.fill`, `checkmark`, `arrow.triangle.pull`, ...) or
   up to four characters, and `--color` takes `#rrggbb` or a name.
 - **The description** is saved with the session.
-- **The latest background notification** stays on the card after it is read;
-  only the unread highlight clears. The message is not saved across restarts.
+- **Notifications from `limux notify`** stay on the card after they are read
+  unless `--no-sidebar-preview` is passed. Agent hooks use the unread marker and
+  desktop notification without adding a second status line. Previews aren't
+  saved across restarts.
 - **Session merging.** Automatic title changes do not conflict with edits in
   another window. If both windows make incompatible edits, Limux leaves the
   shared session intact and keeps a recovery file for the other window.
@@ -351,11 +353,12 @@ limux refresh-pr
   prompt or when the tab's process exits; done and error records stay until
   you come back to that tab. Limux answers the protocol's support query, and
   its terminfo lists `Pst`. `LIMUX_DEBUG_PROGRAM_STATUS=1` logs each report.
-- **Agent lifecycle.** The hooks from `limux hooks setup` set a row under the
-  agent's own key: Running when a prompt is submitted, Needs input on a
-  notification, Idle when a turn ends, and remove it when the session ends.
-  After each turn they start `limux refresh-pr` in the background. Opt out with
-  `LIMUX_CARD_STATUS_DISABLED=1` (rows) or `LIMUX_PR_STATUS_DISABLED=1` (PR row).
+- **Agent lifecycle.** The card shows one built-in activity line. It prefers
+  OSC status to hook updates unless a hook reports a more urgent request for
+  input. Passive idle reminders do not count as requests. A completed OSC
+  status clears when you return to the tab. Scripted status rows and PRs stay
+  separate. Opt out with `LIMUX_CARD_STATUS_DISABLED=1` (hook updates) or
+  `LIMUX_PR_STATUS_DISABLED=1` (PR row).
 - **oh-my-pi (omp).** Run `limux hooks setup omp` to install the bundled
   extension. It remembers each interactive tab's exact saved conversation,
   even when several tabs use the same folder, and updates the binding after
@@ -363,8 +366,8 @@ limux refresh-pr
   original tabs after reopening. For an already-running omp tab, reopen the
   conversation once with `omp --resume` after installing the extension.
   Verify the binding with `limux hooks snapshot omp --dry-run`.
-  The extension also posts a notification and refreshes the PR row after a
-  turn; omp reports its own status over OSC 7501.
+  The extension also sends a desktop notification and refreshes the PR row
+  after a turn; omp reports its own status over OSC 7501.
 - `limux --json list-workspaces` includes each workspace's `description`,
   `statuses` and `git_branch`.
 
