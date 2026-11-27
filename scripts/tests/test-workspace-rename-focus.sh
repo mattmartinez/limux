@@ -215,6 +215,7 @@ wait_for_group_title() {
     sleep 0.1
   done
   echo "FAIL: inline group rename did not commit as '$title'"
+  cli --json list-groups
   exit 1
 }
 
@@ -379,12 +380,12 @@ for _ in $(seq 1 50); do
   if cli --json list-groups | jq -e '.groups | any(.name == "Focus group")' >/dev/null; then break; fi
   sleep 0.1
 done
-# Group headers use the same inline editor. Open its context menu and rename
-# through the GUI so reactivation exercises that shared path too.
+# Activate the first (Rename) item with the keyboard. Its screen coordinates
+# depend on how GTK positions the popover beside the group header.
 sleep 0.2
 xdotool mousemove --window "$WINDOW" 100 110 click 3
 sleep 0.3
-xdotool mousemove --window "$WINDOW" 370 30 click 1
+xdotool key --clearmodifiers Return
 sleep 0.2
 xdotool key --clearmodifiers ctrl+a
 xdotool type --clearmodifiers --delay 10 'Group renamed while away'
