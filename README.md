@@ -407,6 +407,12 @@ Socket authentication is unchanged: the default `localUser` policy permits a
 shortcut run by the same user; `LIMUX_SOCKET_MODE=limuxOnly` rejects commands
 from outside that Limux process's descendants, including desktop shortcuts.
 
+## Terminal mouse scrolling
+
+Hold the middle mouse button in a terminal pane and move above or below the
+press point to scroll. Moving farther scrolls faster; release to stop.
+Middle-click no longer pastes. Use `Ctrl+Shift+V` or the right-click Paste menu.
+
 ## Keyboard shortcuts
 
 Most host-owned defaults use `Ctrl+Alt` so plain terminal `Ctrl` editing keys pass through. Fullscreen defaults to `F11`. Custom remaps may also use `Cmd`, which Limux maps to either the Linux `Meta` or `Super` modifier. `Opt` maps to `Alt`.
