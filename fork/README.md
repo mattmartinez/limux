@@ -20,8 +20,8 @@ bvolpato/ghostty, at the branch `osc7501-program-status`: four commits on top of
 Ghostty pin that add OSC 7501 program status (upstream Ghostty's parser and cmux's embedder
 support, both taken from manaflow-ai/ghostty, plus a fix for Zig 0.16). They change Ghostty's
 action ABI, so the Rust bindings on `main` need them. Inside `ghostty/`, `origin` is
-bvolpato/ghostty and `mattmartinez` is the fork. AUR source validation reads the repository URL
-and pin from the source commit; the unused Flatpak manifest still names bvolpato/ghostty.
+bvolpato/ghostty and `mattmartinez` is the fork. The unused Flatpak manifest
+still names bvolpato/ghostty.
 
 When upstream moves its Ghostty pin, the merge stops on the `ghostty` pointer. Rebase the four
 commits onto upstream's new pin inside `ghostty/`, rebuild with `scripts/build-ghostty.sh`,
@@ -45,7 +45,16 @@ a failed Ghostty build, `scripts/check.sh`, or the live card checks. Logs go to 
 
 The local remotes are `origin` (this fork) and `upstream` (am-will/limux, push disabled).
 
+## GitHub checks
+
+PRs run the dependency audit, Rust checks, and live GTK smoke tests. A new
+push to a PR cancels its older Rust Quality run. The tarball, Debian, AppImage,
+and RPM builds run only when a GitHub release is published or when manually
+dispatched from Actions.
+
 ## Building and installing by hand
+
+This personal fork does not publish to the AUR. Build `limux-card` locally:
 
 ```bash
 fork/card-smoke.sh                      # 34 live checks, isolated under Xvfb
@@ -53,8 +62,8 @@ fork/card-smoke.sh                      # 34 live checks, isolated under Xvfb
 sudo pacman -U fork/limux-card-*.pkg.tar.zst
 ```
 
-Ghostty needs Zig 0.16.0 with the `use_llvm` patch from `PKGBUILD-source.template`;
-`sync-upstream.sh` fetches and patches it into `.tools/` the first time.
+`sync-upstream.sh` fetches Zig 0.16.0 into `.tools/` and enables LLVM for
+implicit Zig executable build steps to work around Arch's CRT linker issue.
 
-To go back to the AUR package: `yay -S limux-bin` (it conflicts with `limux-card` and
+To switch back to upstream's AUR package: `yay -S limux-bin` (it conflicts with `limux-card` and
 replaces it).

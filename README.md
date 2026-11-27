@@ -99,7 +99,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 Uninstall with `./install.sh --prefix="$HOME/.local" --uninstall`.
 
-**Arch Linux (AUR):**
+**Arch Linux (upstream AUR packages):**
 ```bash
 # Prebuilt release package
 yay -S limux-bin

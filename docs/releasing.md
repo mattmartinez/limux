@@ -1,7 +1,8 @@
-# Releasing Limux
+# Upstream GitHub releases
 
-Releases are cut from a version-bumped, green `main` commit. Publishing a
-GitHub release triggers Linux package, RPM, and AUR automation.
+For local builds of this fork, see [fork packaging](../fork/README.md#building-and-installing-by-hand).
+The fork does not publish to the AUR. Its tarball, Debian, AppImage, and RPM
+workflows run on published GitHub releases and manual dispatch, not on PRs.
 
 ## Cut a release
 
@@ -27,12 +28,10 @@ GitHub release triggers Linux package, RPM, and AUR automation.
      --generate-notes
    ```
 
-4. Wait for `Build Linux Release Packages` and `Build RPM Package`. A
-   successful tagged Linux build triggers `Publish to AUR`.
+4. Wait for `Build Linux Release Packages` and `Build RPM Package`.
 
-5. Verify release contains tarball, Debian package, AppImage, and RPM for both
-   x86_64 and aarch64 (Debian `amd64` and `arm64`). Confirm AUR `limux-bin`
-   reports matching version for both architectures.
+5. Verify the release contains tarball, Debian package, AppImage, and RPM for
+   both x86_64 and aarch64 (Debian `amd64` and `arm64`).
 
 ## Verify packaged runtime
 
