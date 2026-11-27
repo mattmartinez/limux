@@ -1276,7 +1276,7 @@ mod tests {
                 dry_run: false,
             },
             |_| AgentHookSessionStore::new_for_dir("omp", dir.path()),
-            &no_file_read,
+            no_file_read,
         )
         .unwrap();
         assert_eq!(report.captured.len(), 1);

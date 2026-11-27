@@ -8,6 +8,7 @@ Fork-specific changes relative to [upstream](https://github.com/am-will/limux) a
 
 ## Log
 
+- **2026-11-27 — Fix Clippy in the omp snapshot regression test** · files: `rust/limux-cli/src/session_snapshot.rs` · kind: edits-upstream · why: pass the file-reader function directly to the generic snapshot helper · upstream-risk: low
 - **2026-11-27 — Show one agent activity line per workspace card** · files: `rust/limux-cli/`, `rust/limux-host-linux/src/`, `hooks/omp-limux-card.ts`, `fork/card-smoke.sh`, `fork/CODEMAP.md`, `README.md` · kind: edits-upstream · why: prefer OSC status over duplicate hook rows and keep passive idle reminders from replacing a finished status · upstream-risk: low
 - **2026-11-27 — Preserve full automatic workspace titles** · files: `rust/limux-host-linux/src/` (`pane.rs`, `window.rs`), `fork/card-smoke.sh`, `fork/CODEMAP.md` · kind: edits-upstream · why: the upstream tab preview discarded the title suffix before the card and tooltip could show it · upstream-risk: low
 - **2026-11-27 — Add a Save Sessions toolbar action** · files: `rust/limux-cli/src/` (`main.rs`, `session_snapshot.rs`), `rust/limux-host-linux/src/` (`layout_state.rs`, `window.rs`, `window/session_persistence.rs`), `README.md`, `fork/CODEMAP.md` · kind: edits-upstream · why: capture restorable agent sessions and save the current window without using the terminal or risking a save in another window · upstream-risk: low
