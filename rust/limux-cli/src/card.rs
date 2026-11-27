@@ -166,28 +166,27 @@ pub fn describe_result(command: &str, payload: &Value) -> String {
 /// What an agent hook event does to the agent's own status row, cmux style.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lifecycle {
-    /// Set the row to this value, icon and colour.
-    Set(&'static str, &'static str, &'static str),
-    /// Remove the row (the session ended).
+    /// Set the row to this value, icon, colour and priority.
+    Set(&'static str, &'static str, &'static str, i64),
+    /// Remove the row when activity ends.
     Clear,
     /// Leave the row as it is.
     Keep,
 }
 
-/// Running on a new prompt, Needs input on a notification, Idle when a turn
-/// or session starts or stops, and gone when the session ends.
+/// Running on a new prompt, Needs input on a notification, and no row once
+/// a turn finishes or the session ends.
 pub fn lifecycle(event: &str) -> Lifecycle {
     match event {
         "UserPromptSubmit" | "prompt-submit" | "BeforeAgent" | "PreToolUse" => {
-            Lifecycle::Set("Running", "bolt.fill", "#5c9cf5")
+            Lifecycle::Set("Running", "bolt.fill", "#5c9cf5", 2)
         }
         "Notification" | "notification" | "PermissionRequest" => {
-            Lifecycle::Set("Needs input", "bell.fill", "#e2c05c")
+            // Match the OSC status priority for a request that needs action.
+            Lifecycle::Set("Needs input", "bell.fill", "#e2c05c", 4)
         }
-        "Stop" | "stop" | "finished" | "AfterAgent" | "SessionStart" | "session-start" => {
-            Lifecycle::Set("Idle", "pause.circle.fill", "#8d8d8d")
-        }
-        "SessionEnd" | "session-end" | "Cleanup" | "cleanup" => Lifecycle::Clear,
+        "Stop" | "stop" | "finished" | "AfterAgent" | "SessionStart" | "session-start"
+        | "SessionEnd" | "session-end" | "Cleanup" | "cleanup" => Lifecycle::Clear,
         _ => Lifecycle::Keep,
     }
 }
@@ -195,7 +194,7 @@ pub fn lifecycle(event: &str) -> Lifecycle {
 /// The request that applies `event` to the row `agent_key`, if any.
 pub fn lifecycle_params(agent_key: &str, event: &str, workspace: &str) -> Option<(String, Value)> {
     match lifecycle(event) {
-        Lifecycle::Set(value, icon, color) => Some((
+        Lifecycle::Set(value, icon, color, priority) => Some((
             "workspace.set_status".to_string(),
             json!({
                 "workspace_id": workspace,
@@ -203,7 +202,8 @@ pub fn lifecycle_params(agent_key: &str, event: &str, workspace: &str) -> Option
                 "value": value,
                 "icon": icon,
                 "color": color,
-                "priority": 10,
+                "agent_activity": true,
+                "priority": priority,
             }),
         )),
         Lifecycle::Clear => Some((
@@ -414,10 +414,9 @@ mod tests {
             lifecycle_params("claude", "Notification", "ws").unwrap().1["value"],
             "Needs input"
         );
-        assert_eq!(
-            lifecycle_params("claude", "stop", "ws").unwrap().1["value"],
-            "Idle"
-        );
+        let (method, params) = lifecycle_params("claude", "stop", "ws").unwrap();
+        assert_eq!(method, "workspace.clear_status");
+        assert_eq!(params["key"], "claude");
         let (method, params) = lifecycle_params("claude", "SessionEnd", "ws").unwrap();
         assert_eq!(method, "workspace.clear_status");
         assert_eq!(params["key"], "claude");

@@ -118,13 +118,16 @@ check "bad key is refused" "! cli set-status --workspace '$WS2' 'bad key' v >/de
 shot 04-escaped
 cli clear-status --workspace "$WS2" evil >/dev/null
 
-# the hook path: a Claude Stop event from inside the workspace sets Idle
-echo '{"hook_event_name":"Stop","session_id":"smoke-1","cwd":"'"$REPO"'"}' |
-  LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" LIMUX_PR_STATUS_DISABLED=1 "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude stop >/dev/null 2>&1
-check "Claude Stop hook sets the claude row to Idle" "[ \"\$(cli --json list-status --workspace '$WS2' | jq -r '.statuses[] | select(.key==\"claude\") | .value')\" = Idle ]"
+# The hook path: finishing a turn removes the fallback before showing any OSC completion.
 echo '{"hook_event_name":"UserPromptSubmit","session_id":"smoke-1","prompt":"go"}' |
   LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude prompt-submit >/dev/null 2>&1
 check "prompt submit sets Running" "[ \"\$(cli --json list-status --workspace '$WS2' | jq -r '.statuses[] | select(.key==\"claude\") | .value')\" = Running ]"
+echo '{"hook_event_name":"Stop","session_id":"smoke-1","cwd":"'"$REPO"'"}' |
+  LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" LIMUX_PR_STATUS_DISABLED=1 "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude stop >/dev/null 2>&1
+check "Claude Stop removes the fallback row instead of replacing it with Idle" "[ \"\$(cli --json list-status --workspace '$WS2' | jq '[.statuses[] | select(.key==\"claude\")] | length')\" = 0 ]"
+echo '{"hook_event_name":"Notification","notification_type":"permission_prompt","session_id":"smoke-1"}' |
+  LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude notification >/dev/null 2>&1
+check "a permission prompt still shows Needs input without OSC status" "[ \"\$(cli --json list-status --workspace '$WS2' | jq -r '.statuses[] | select(.key==\"claude\") | .value')\" = 'Needs input' ]"
 echo '{"hook_event_name":"SessionEnd","session_id":"smoke-1"}' |
   LIMUX_WORKSPACE_ID="$WS2" LIMUX_SURFACE_ID="x" "$CLI" --socket "$LIMUX_SOCKET" --json hooks claude session-end >/dev/null 2>&1
 check "session end removes the claude row" "[ \"\$(cli --json list-status --workspace '$WS2' | jq '[.statuses[] | select(.key==\"claude\")] | length')\" = 0 ]"
@@ -199,12 +202,16 @@ check "restored agent tab: shell left POSIX mode and read its startup files" \
 # prompt sets that to the folder (\w). The path row then hides its echo.
 check "unnamed workspace takes the terminal's title" "[ \"\$(jq -r .title <<<'$J3')\" = '~/work/demo-repo' ]"
 shot 06-restored-agent-tab
-# An agent's spinner frame is dropped, so its animated title is one name.
-cli send 'printf "\033]2;\342\240\202 Smoke task\007"; sleep 4' >/dev/null && cli send-key Enter >/dev/null
+# The card uses the full OSC title, not the tab strip's shortened preview.
+# A title suffix change must refresh the card even when that preview is unchanged.
+cli send 'printf "\033]2;\342\240\202 Smoke task with a common prefix: first suffix\007"; sleep 2; printf "\033]2;\342\240\202 Smoke task with a common prefix: second suffix\007"; sleep 2' >/dev/null && cli send-key Enter >/dev/null
+sleep 1
+check "workspace title keeps the full OSC text without the spinner" \
+  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task with a common prefix: first suffix' ]"
+sleep 2
+check "a changed title suffix updates the workspace even if the tab preview is unchanged" \
+  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task with a common prefix: second suffix' ]"
 sleep 1.5
-check "a spinner frame is dropped from the title" \
-  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task' ]"
-sleep 3
 # A name the user chose stays, and is saved as theirs.
 cli rename-workspace --workspace "$(jq -r .ref <<<"$J3")" "Pinned name" >/dev/null
 cli send 'cd ~' >/dev/null && cli send-key Enter >/dev/null

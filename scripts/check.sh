@@ -19,7 +19,5 @@ cargo test --locked --workspace -- --test-threads=1
 ./scripts/tests/test-package-svg-loader.sh
 ./scripts/tests/test-appimage-launcher.sh
 ./scripts/tests/test-apparmor-profile.sh
-./scripts/tests/test-aur-source-package.sh
-./scripts/tests/test-aur-bin-package.sh
 ./scripts/tests/test-smoke-child-count.sh
 ./scripts/tests/test-ghostty-provenance.sh

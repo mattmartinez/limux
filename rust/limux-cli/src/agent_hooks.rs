@@ -157,18 +157,18 @@ impl AgentHookSessionStore {
 
     pub(crate) fn update(
         &self,
-        session_id: &str,
+        key: &str,
         update: impl FnOnce(Option<&AgentHookSessionRecord>) -> AgentHookSessionRecord,
     ) -> Result<()> {
-        let Some(session_id) = normalized(session_id) else {
+        let Some(key) = normalized(key) else {
             return Ok(());
         };
         let _lock = self.lock()?;
         let mut file = self.load()?;
-        let record = update(file.sessions.get(&session_id));
+        let record = update(file.sessions.get(&key));
         let ended_before = file.ended_sessions.len();
         file.ended_sessions.retain(|ended| {
-            ended.session_id != session_id
+            ended.session_id != record.session_id
                 || tab_identity(&ended.surface_id) != tab_identity(&record.surface_id)
         });
         prune_ended_sessions(&mut file.ended_sessions, now_seconds(), || {
@@ -177,15 +177,15 @@ impl AgentHookSessionStore {
         let ended_changed = file.ended_sessions.len() != ended_before;
         if !ended_changed
             && file.version == 1
-            && file.sessions.get(&session_id).is_some_and(|existing| {
-                record_unchanged_and_newest(&file.sessions, &session_id, &record)
+            && file.sessions.get(&key).is_some_and(|existing| {
+                record_unchanged_and_newest(&file.sessions, &key, &record)
                     && !sibling_store_has_newer_surface_session(&self.path, existing)
             })
         {
             return Ok(());
         }
         file.version = 1;
-        file.sessions.insert(session_id, record);
+        file.sessions.insert(key, record);
         self.save(&file)
     }
 
@@ -200,7 +200,15 @@ impl AgentHookSessionStore {
         };
         let _lock = self.lock()?;
         let mut file = self.load()?;
-        let removed = file.sessions.remove(&session_id);
+        // omp stores one binding per tab. Exiting an older restored conversation
+        // must not unlink a different conversation selected in that same tab.
+        let removed = file.sessions.remove(&session_id).or_else(|| {
+            let key = tab_identity(surface_id?);
+            if file.sessions.get(key)?.session_id != session_id {
+                return None;
+            }
+            file.sessions.remove(key)
+        });
         let now = now_seconds();
         let surface_id = surface_id.and_then(normalized).or_else(|| {
             removed
@@ -596,10 +604,10 @@ fn safe_store_name(agent: &str) -> String {
 
 fn record_unchanged_and_newest(
     sessions: &BTreeMap<String, AgentHookSessionRecord>,
-    session_id: &str,
+    key: &str,
     next: &AgentHookSessionRecord,
 ) -> bool {
-    let Some(existing) = sessions.get(session_id) else {
+    let Some(existing) = sessions.get(key) else {
         return false;
     };
     let same_launch_command = match (&existing.launch_command, &next.launch_command) {
@@ -622,8 +630,8 @@ fn record_unchanged_and_newest(
         return false;
     }
     let target_tab = tab_identity(&existing.surface_id);
-    !sessions.iter().any(|(other_id, other)| {
-        other_id != session_id
+    !sessions.iter().any(|(other_key, other)| {
+        other_key != key
             && (other.surface_id == existing.surface_id
                 || tab_identity(&other.surface_id) == target_tab)
             && other.updated_at >= existing.updated_at
@@ -750,6 +758,41 @@ mod tests {
             launch_command: None,
             updated_at: now_seconds(),
         }
+    }
+
+    #[test]
+    fn omp_cleanup_does_not_unbind_other_tabs_or_a_session_switched_in_place() {
+        let dir = tempdir().unwrap();
+        let store = AgentHookSessionStore::new_for_dir("omp", dir.path());
+        let bind = |tab, surface: &str, session| {
+            store
+                .update(tab, |_| AgentHookSessionRecord {
+                    surface_id: surface.into(),
+                    pid: Some(42),
+                    ..test_record(session)
+                })
+                .unwrap();
+        };
+        bind("a", "1:a", "/first.jsonl");
+        bind("b", "1:b", "/first.jsonl");
+        bind("a", "1:a", "/switched.jsonl");
+
+        store
+            .remove("/first.jsonl", Some("workspace"), Some("2:a"))
+            .unwrap();
+        let current = |surface| {
+            store
+                .session_for_live_pid(42, "workspace", surface)
+                .unwrap()
+        };
+        assert_eq!(current("1:a").as_deref(), Some("/switched.jsonl"));
+        assert_eq!(current("1:b").as_deref(), Some("/first.jsonl"));
+
+        store
+            .remove("/switched.jsonl", Some("workspace"), Some("2:a"))
+            .unwrap();
+        assert!(current("1:a").is_none());
+        assert_eq!(current("1:b").as_deref(), Some("/first.jsonl"));
     }
 
     #[test]

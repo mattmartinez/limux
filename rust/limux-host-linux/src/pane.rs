@@ -4,6 +4,7 @@
 //!
 //! All on one line. Tabs left-justified, icons right-justified.
 
+use std::borrow::Cow;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1542,7 +1543,7 @@ impl TabEntry {
             .as_deref()
             .map(|title| match self.kind {
                 TabKind::Terminal { .. } => display_terminal_title(title),
-                _ => title.to_string(),
+                _ => Cow::Borrowed(title),
             });
         self.title_label.set_text(
             self.custom_name
@@ -1821,11 +1822,10 @@ fn make_terminal_callbacks(
                 return;
             }
             if let Some(entry) = state_for_title.borrow_mut().find_tab_mut(&tid_for_title) {
-                let display = display_terminal_title(title);
-                if entry.automatic_title.as_deref() == Some(display.as_str()) {
+                if entry.automatic_title.as_deref() == Some(title) {
                     return;
                 }
-                entry.automatic_title = Some(display.clone());
+                entry.automatic_title = Some(title.to_owned());
                 if entry.custom_name.is_some() {
                     return;
                 }
@@ -1996,15 +1996,15 @@ fn make_terminal_callbacks(
     }
 }
 
-fn display_terminal_title(title: &str) -> String {
+fn display_terminal_title(title: &str) -> Cow<'_, str> {
     let mut indices = title.char_indices();
     let Some((truncate_at, _)) = indices.nth(21) else {
-        return title.to_string();
+        return Cow::Borrowed(title);
     };
     if indices.next().is_none() {
-        return title.to_string();
+        return Cow::Borrowed(title);
     }
-    format!("{}…", &title[..truncate_at])
+    Cow::Owned(format!("{}…", &title[..truncate_at]))
 }
 
 fn resolved_link_destination(

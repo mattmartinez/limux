@@ -1,14 +1,6 @@
 name: Build Linux Release Packages
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/release-linux.yml
-      - Cargo.lock
-      - Cargo.toml
-      - ghostty
-      - rust/**
-      - scripts/**
   release:
     types: [published]
   workflow_dispatch:
@@ -70,8 +62,6 @@ jobs:
           set -euo pipefail
           if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_VERSION" ]; then
             version="$INPUT_VERSION"
-          elif [ "$EVENT_NAME" = "pull_request" ]; then
-            version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           else
             version="${REF_NAME#v}"
           fi
@@ -228,7 +218,6 @@ jobs:
 
   publish:
     name: Upload Linux packages to release
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     needs: packages
     runs-on: ubuntu-latest
     permissions:

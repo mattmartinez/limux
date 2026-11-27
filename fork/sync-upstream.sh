@@ -72,8 +72,8 @@ if [ ! -x "$ZIG_DIR/zig" ]; then
   echo "$sum  $ROOT/.tools/zig.tar.xz" | sha256sum -c --quiet - || die "Zig checksum mismatch"
   tar -xJf "$ROOT/.tools/zig.tar.xz" -C "$ROOT/.tools"
 fi
-# Same patch as PKGBUILD-source.template's prepare(): Zig's own linker cannot
-# link one of Ghostty's build tools, LLVM's can.
+# Zig's native linker cannot read the .sframe records in Arch's CRT.
+# Use LLVM for implicit executable build steps without modifying Ghostty.
 sed -i '/^pub const ExecutableOptions = struct {/,/^};/s/use_llvm: ?bool = null,/use_llvm: ?bool = true,/' \
   "$ZIG_DIR/lib/std/Build.zig"
 

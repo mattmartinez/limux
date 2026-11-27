@@ -356,7 +356,7 @@ tmux-compatible commands:
   popup | bind-key | unbind-key | copy-mode (not supported)
 
 Agent integrations:
-  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] [--osc] <title>
+  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] [--no-sidebar-preview] [--osc] <title>
   hooks setup [agent] [--osc] | hooks uninstall [agent] | hooks snapshot [agent] [--dry-run] [--save-session] [--all-sockets] | hooks <agent> <event>
   claude-hook | opencode-hook | gemini-hook | agy-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]
   agent-team [--agents codex,claude[,opencode,gemini,agy]] [--cwd <path>] [--no-launch] [--dry-run]
@@ -1124,7 +1124,7 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
             "--body",
             "--message",
         ],
-        &["--osc"],
+        &["--no-sidebar-preview", "--osc"],
     );
     let (workspace, surface) = notification_scope(&args, env_opt);
 
@@ -1142,6 +1142,9 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
 
     let mut params = Map::new();
     params.insert("title".to_string(), Value::String(title));
+    if parse_flag(&args, "--no-sidebar-preview") {
+        params.insert("sidebar_preview".to_string(), Value::Bool(false));
+    }
     if !subtitle.is_empty() {
         params.insert("subtitle".to_string(), Value::String(subtitle));
     }
@@ -1225,6 +1228,18 @@ fn agy_stop_notification(payload: &Value) -> Option<(String, String)> {
     Some((title.to_string(), body.to_owned()))
 }
 
+fn agent_card_event<'a>(agent: agent_hooks::AgentKind, event: &'a str, payload: &Value) -> &'a str {
+    // Claude's idle_prompt is a timer, not a permission request or a question.
+    if agent == agent_hooks::AgentKind::Claude
+        && matches!(event, "Notification" | "notification")
+        && hook_str(payload, &["notification_type"]) == Some("idle_prompt")
+    {
+        "IdlePrompt"
+    } else {
+        event
+    }
+}
+
 fn agent_hook_notification(
     agent: agent_hooks::AgentKind,
     event: &str,
@@ -1253,7 +1268,7 @@ fn agent_hook_notification(
         "SessionStart" | "session-start" | "SessionEnd" | "session-end" | "UserPromptSubmit"
         | "prompt-submit" | "PreInvocation" | "pre-invocation" | "PostInvocation"
         | "post-invocation" | "PreToolUse" | "PostToolUse" | "SubagentStop" | "subagent-stop"
-        | "Cleanup" | "cleanup" | "restore-exit" => None,
+        | "Cleanup" | "cleanup" | "restore-exit" | "restore-session" | "IdlePrompt" => None,
         other => Some((
             format!("{agent_label}: {other}"),
             hook_str(payload, &["message", "summary"])
@@ -1299,7 +1314,8 @@ async fn run_agent_hook(
 
     // Build a human-friendly title + body depending on event + agent.
     persist_agent_hook_session(agent, args, &payload, &event)?;
-    let notification_title_body = agent_hook_notification(agent, &event, &payload);
+    let card_event = agent_card_event(agent, &event, &payload);
+    let notification_title_body = agent_hook_notification(agent, card_event, &payload);
 
     if let Some((title, body)) = notification_title_body {
         let subtitle = hook_str(
@@ -1316,6 +1332,9 @@ async fn run_agent_hook(
 
         let mut params = Map::new();
         params.insert("title".to_string(), Value::String(title));
+        // The card already has one activity line. Keep the desktop notification
+        // and unread marker without adding another summary beneath the title.
+        params.insert("sidebar_preview".to_string(), Value::Bool(false));
         if !subtitle.is_empty() {
             params.insert("subtitle".to_string(), Value::String(subtitle));
         }
@@ -1333,7 +1352,7 @@ async fn run_agent_hook(
         }
     }
 
-    update_agent_card(client, agent, args, &payload, &event).await;
+    update_agent_card(client, agent, args, &payload, card_event).await;
 
     Ok(agent_hook_output(agent, &event, &payload))
 }
@@ -1481,6 +1500,10 @@ fn persist_agent_hook_session(
         return Ok(());
     };
 
+    if agent == agent_hooks::AgentKind::Omp && !Path::new(&session_id).is_absolute() {
+        return Ok(());
+    }
+
     let store = agent_hooks::AgentHookSessionStore::new(agent);
     match agent_hook_persistence_action(event) {
         AgentHookPersistenceAction::Remove => {
@@ -1543,7 +1566,15 @@ fn persist_agent_hook_session(
     let proc_cwd = ancestor_pid.and_then(proc_cwd_path);
     let proc_env = ancestor_pid.and_then(proc_allowed_environment);
 
-    let result = store.update(&session_id, |existing| {
+    // omp's file path is the resume target, not the identity of a tab.
+    let tab_key;
+    let key = if agent == agent_hooks::AgentKind::Omp {
+        tab_key = agent_hooks::tab_identity(&surface_id).to_owned();
+        &tab_key
+    } else {
+        &session_id
+    };
+    let result = store.update(key, |existing| {
         let cwd = hook_cwd(payload)
             .or_else(|| proc_cwd.clone())
             .or_else(|| existing.and_then(|record| record.cwd.clone()));
@@ -1944,6 +1975,7 @@ fn parse_hooks_snapshot_args(
     let mut agent_name: Option<String> = None;
     let mut workspace_id: Option<String> = None;
     let mut surface_id: Option<String> = None;
+    let mut window_pid = None;
     let mut all_sockets = false;
     let mut dry_run = false;
     let mut save_session = false;
@@ -1972,7 +2004,7 @@ fn parse_hooks_snapshot_args(
                 all_sockets = true;
                 idx += 1;
             }
-            "--agent" | "--workspace" | "--surface" => {
+            "--agent" | "--workspace" | "--surface" | "--window-pid" => {
                 let value = args
                     .get(idx + 1)
                     .filter(|next| !next.starts_with('-') && !next.trim().is_empty())
@@ -1981,6 +2013,16 @@ fn parse_hooks_snapshot_args(
                     "--agent" => set_agent(value.clone())?,
                     "--workspace" => workspace_id = Some(value.clone()),
                     "--surface" => surface_id = Some(value.clone()),
+                    "--window-pid" => {
+                        let pid = value
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|pid| *pid > 1)
+                            .ok_or_else(|| {
+                                anyhow!("--window-pid requires a process ID greater than 1")
+                            })?;
+                        window_pid = Some(pid);
+                    }
                     _ => unreachable!(),
                 }
                 idx += 2;
@@ -2032,6 +2074,7 @@ fn parse_hooks_snapshot_args(
             agent,
             workspace_id,
             surface_id,
+            window_pid,
             target_socket: Some(target_socket),
             all_sockets,
             dry_run,
@@ -2175,7 +2218,7 @@ fn install_hook_target(agent: agent_hooks::AgentKind, osc: bool) -> Result<()> {
                 ("SessionEnd", "session-end"),
             ],
         ),
-        agent_hooks::AgentKind::OpenCode if osc => {
+        agent_hooks::AgentKind::OpenCode | agent_hooks::AgentKind::Omp if osc => {
             bail!("OSC hook setup supports Codex, Claude, Gemini, and Antigravity")
         }
         agent_hooks::AgentKind::OpenCode => install_opencode_plugin(),
@@ -2191,6 +2234,7 @@ fn install_hook_target(agent: agent_hooks::AgentKind, osc: bool) -> Result<()> {
             ],
         ),
         agent_hooks::AgentKind::Agy => install_agy_hooks(&agy_hooks_path(), osc),
+        agent_hooks::AgentKind::Omp => install_omp_extension(&omp_extension_path()),
     }
 }
 
@@ -2208,6 +2252,7 @@ fn uninstall_hook_target(agent: agent_hooks::AgentKind) -> Result<()> {
         }
         agent_hooks::AgentKind::Gemini => uninstall_json_hooks(&gemini_settings_path(), agent),
         agent_hooks::AgentKind::Agy => uninstall_agy_hooks(&agy_hooks_path()),
+        agent_hooks::AgentKind::Omp => uninstall_omp_extension(&omp_extension_path()),
     }
 }
 
@@ -2422,7 +2467,7 @@ fn hook_timeout(agent: agent_hooks::AgentKind) -> u64 {
         | agent_hooks::AgentKind::Codex
         | agent_hooks::AgentKind::Agy => 5,
         agent_hooks::AgentKind::Gemini => 5000,
-        agent_hooks::AgentKind::OpenCode => 0,
+        agent_hooks::AgentKind::OpenCode | agent_hooks::AgentKind::Omp => 0,
     }
 }
 
@@ -2437,6 +2482,32 @@ fn uninstall_json_hooks(path: &Path, agent: agent_hooks::AgentKind) -> Result<()
     }
     drop_emptied_objects(&mut root, &before);
     write_changed_json_object(path, &before, &root)
+}
+
+const OMP_EXTENSION_SOURCE: &str = include_str!("../../../hooks/omp-limux-card.ts");
+const OMP_EXTENSION_HEADER: &str = "// Limux workspace card for oh-my-pi (omp).";
+
+fn read_managed_omp_extension(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(source) if source.lines().next() == Some(OMP_EXTENSION_HEADER) => Ok(Some(source)),
+        Ok(_) => bail!("{} is not a Limux-managed extension", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn install_omp_extension(path: &Path) -> Result<()> {
+    if read_managed_omp_extension(path)?.as_deref() == Some(OMP_EXTENSION_SOURCE) {
+        return Ok(());
+    }
+    write_hook_config(path, OMP_EXTENSION_SOURCE.as_bytes())
+}
+
+fn uninstall_omp_extension(path: &Path) -> Result<()> {
+    if read_managed_omp_extension(path)?.is_some() {
+        fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn install_opencode_plugin() -> Result<()> {
@@ -2579,17 +2650,21 @@ fn write_changed_json_object(
     if before == object {
         return Ok(());
     }
+    let encoded = serde_json::to_vec_pretty(object).context("failed to encode hook config")?;
+    write_hook_config(path, &encoded)
+}
+
+fn write_hook_config(path: &Path, encoded: &[u8]) -> Result<()> {
     let target = resolve_symlinks(path)?;
     let parent = target
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    let encoded = serde_json::to_vec_pretty(object).context("failed to encode hook config")?;
     // The temporary file is private, and removed unless it replaces the target.
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to stage {}", target.display()))?;
-    std::io::Write::write_all(&mut temp, &encoded)
+    std::io::Write::write_all(&mut temp, encoded)
         .with_context(|| format!("failed to write {}", temp.path().display()))?;
     if let Ok(existing) = fs::metadata(&target) {
         fs::set_permissions(temp.path(), existing.permissions())
@@ -2651,6 +2726,17 @@ fn agy_hooks_path_from(home: Option<PathBuf>) -> PathBuf {
 
 fn agy_hooks_path() -> PathBuf {
     agy_hooks_path_from(dirs::home_dir())
+}
+
+fn omp_extension_path() -> PathBuf {
+    non_empty_env_path("PI_CODING_AGENT_DIR")
+        .or_else(|| {
+            non_empty_env_path("PI_CONFIG_DIR")
+                .or_else(|| dirs::home_dir().map(|home| home.join(".omp")))
+                .map(|root| root.join("agent"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".omp/agent"))
+        .join("extensions/limux-card.ts")
 }
 
 fn opencode_config_dir() -> PathBuf {
@@ -5764,6 +5850,25 @@ mod cli_arg_tests {
     }
 
     #[test]
+    fn omp_setup_upgrades_the_card_extension_but_preserves_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions/limux-card.ts");
+        install_omp_extension(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), OMP_EXTENSION_SOURCE);
+
+        fs::write(&path, format!("{OMP_EXTENSION_HEADER}\n// old release\n")).unwrap();
+        install_omp_extension(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), OMP_EXTENSION_SOURCE);
+        uninstall_omp_extension(&path).unwrap();
+        assert!(!path.exists());
+
+        fs::write(&path, "// user extension").unwrap();
+        assert!(install_omp_extension(&path).is_err());
+        assert!(uninstall_omp_extension(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "// user extension");
+    }
+
+    #[test]
     fn opencode_plugin_embeds_installer_cli_command() {
         let source = opencode_plugin_source_with_command("/tmp/limux-cli").expect("plugin source");
 
@@ -7449,6 +7554,8 @@ mod new_pane_tests {
                 "--workspace=ws-1",
                 "--surface",
                 "1:tab-a",
+                "--window-pid",
+                "42",
                 "--dry-run",
                 "--save-session",
                 "--all-sockets",
@@ -7459,6 +7566,7 @@ mod new_pane_tests {
         assert_eq!(opts.agent, Some(agent_hooks::AgentKind::Agy));
         assert_eq!(opts.workspace_id.as_deref(), Some("ws-1"));
         assert_eq!(opts.surface_id.as_deref(), Some("1:tab-a"));
+        assert_eq!(opts.window_pid, Some(42));
         assert!(opts.dry_run);
         assert!(opts.all_sockets);
         assert!(save);

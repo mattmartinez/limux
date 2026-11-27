@@ -141,9 +141,9 @@ LIMUX_GHOSTTY_DEBUG_SYMBOLS=1 "$FIXTURE/scripts/build-ghostty.sh" >/dev/null
 reject 'did not retain requested debug symbols' env LIMUX_GHOSTTY_DEBUG_SYMBOLS=1 TEST_ZIG_IGNORE_DEBUG=1 "$FIXTURE/scripts/build-ghostty.sh"
 [ ! -e "$PROVENANCE" ]
 
-# AUR builds use a symlink to a separate Git checkout as the source submodule.
-mv "$FIXTURE/ghostty" "$TMP_DIR/aur-ghostty"
-ln -s "$TMP_DIR/aur-ghostty" "$FIXTURE/ghostty"
+# A symlinked Ghostty checkout must retain valid build provenance.
+mv "$FIXTURE/ghostty" "$TMP_DIR/linked-ghostty"
+ln -s "$TMP_DIR/linked-ghostty" "$FIXTURE/ghostty"
 "$FIXTURE/scripts/build-ghostty.sh" >/dev/null
 "$FIXTURE/scripts/check-ghostty.sh" >/dev/null
 

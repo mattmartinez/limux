@@ -331,6 +331,7 @@ pub enum ControlCommand {
         title: String,
         subtitle: String,
         body: String,
+        sidebar_preview: bool,
         reply: mpsc::Sender<BridgeResult>,
     },
 }
@@ -1840,6 +1841,10 @@ fn handle_method(
                     title,
                     subtitle,
                     body,
+                    sidebar_preview: params
+                        .get("sidebar_preview")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                     reply,
                 },
                 rx,

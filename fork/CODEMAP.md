@@ -25,6 +25,14 @@ change is the `card-status` subset (no `fork/`, no Ghostty pin move).
 
 `AGENTS.md` and `CLAUDE.md` open with "This checkout is a fork". A sync that conflicts on either file must put that section back. It is how the next agent finds this map.
 
+Keep upstream's AUR workflow, PKGBUILD templates, renderers, and validation
+scripts out of this fork on future merges. Arch installs use the local
+`fork/PKGBUILD`; it does not publish anything.
+
+PRs run Rust Quality (including GTK smoke) and its visual gallery comment, not
+the Linux and RPM release package matrices. Keep the package workflows limited
+to releases and manual dispatch when syncing upstream.
+
 ## What the fork is
 
 cmux-style sidebar cards on top of Limux, plus the Ghostty and browser-check
@@ -75,13 +83,28 @@ Limits, in `workspace_card.rs`: 16 rows, key 32 chars, value 160, description 20
 
 Status rows are not persisted. `description` is, on `WorkspaceState`. `named_by_user` is too.
 
-Hooks (`limux hooks setup`) write a row under the agent's own key: Running on submit, Needs input on notification, Idle when the turn ends, removed when the session ends, then background `refresh-pr`. Opt out: `LIMUX_CARD_STATUS_DISABLED=1`, `LIMUX_PR_STATUS_DISABLED=1`.
+Hooks (`limux hooks setup`) write fallback Running or Needs input rows, then
+clear them when the turn or session ends. The card shows one built-in activity
+line, preferring OSC 7501 unless a hook has a more urgent request for input.
+User-written statuses and PRs stay visible. Hook notifications retain the
+unread marker and desktop alert but skip the card preview. Ignore Claude's
+passive idle prompt, not real permission alerts.
+Hooks refresh PRs after a turn. Opt out: `LIMUX_CARD_STATUS_DISABLED=1`,
+`LIMUX_PR_STATUS_DISABLED=1`.
 
 ### Titles follow the focused tab
 
 `refresh_workspace_title` in `window.rs`. A workspace nobody named takes the title of the tab it last had focused (tab name, else the terminal title), passed through `workspace_title_from_terminal`: breaks become spaces, other controls and bidi overrides are refused, cut at 256 with an ellipsis, a lone spinner frame is dropped. `named_by_user` blocks that. A session saved before the field existed counts as user-named unless the name is `default_workspace_name(folder_path)` (`workspace_named_by_user`).
 
-The title callback in `pane.rs` (`on_title_changed`) must still call `(callbacks.on_title_changed)`. That is what moves the card. Upstream's dedup (skip when the stored title already equals the display string) is fine. Storing the display form is fine. Dropping the callback, or skipping it on the first change, is not. `LIMUX_DEBUG_TITLES=1` logs the decision.
+The card's title label wraps at the available width, including long words. It
+also shows the current workspace name as a plain-text tooltip after either a
+manual rename or an automatic title change.
+
+`pane.rs` keeps the complete terminal title in `automatic_title`. The 22-character
+preview belongs only on the tab label, never in the workspace title or tooltip.
+Deduplicate OSC title changes against the complete title and still call
+`callbacks.on_title_changed`, including when only the suffix changes.
+`LIMUX_DEBUG_TITLES=1` logs the workspace-title decision.
 
 Automatic title-only changes are safe to ignore when another window edits or deletes a workspace. Keep true session conflicts recoverable. Reading a card notification clears its unread styling, not its message.
 
@@ -98,7 +121,7 @@ Submodule pin on the fork: `9f647e126082f93ba36b0d03f282f3fd5f4a8769` from `matt
 - `b7923ba6` ABI size and loop fix
 - `9f647e12` `ProgramStatus.C` named for Zig 0.16
 
-`.gitmodules` url is `https://github.com/mattmartinez/ghostty.git`. The AUR source workflow reads the URL and pin from the same Limux commit; the unused Flatpak manifest still names `bvolpato/ghostty`. Do not revert the url or the pin to take upstream's. Inside `ghostty/`, `origin` is bvolpato and `mattmartinez` is the fork.
+`.gitmodules` url is `https://github.com/mattmartinez/ghostty.git`. The unused Flatpak manifest still names `bvolpato/ghostty`. Do not revert the url or the pin to take upstream's. Inside `ghostty/`, `origin` is bvolpato and `mattmartinez` is the fork.
 
 The four commits change Ghostty's action ABI. Fork bindings assert `ghostty_action_u` = 48 and `ghostty_action_s` = 56. Upstream's tree, against the old pin, asserts 24 and 32. Taking upstream's sizes will not match this Ghostty. Keep 48/56. Upstream scrollbar asserts (`ghostty_surface_scrollbar_s`, size 32) can be added if that struct is in the bindings; they are not a reason to shrink the action union.
 
@@ -109,6 +132,17 @@ When upstream does move its Ghostty pin, stop. Rebase the four commits onto the 
 ### Restored agent tabs keep shell integration
 
 `RestorableAgentState::resume_command(shell_integration)` and `wrap_restored_agent_command`. When Ghostty's `shell-integration` is not `none`, the restored command ends in `BASH_INTEGRATED_LOGIN_SHELL` (`GHOSTTY_BASH_INJECT=1`), not a plain login shell. `CURRENT_SHELL_INTEGRATION_ENABLED` and `CURRENT_AUTOSTART_SHELL_KIND` in `terminal.rs` are what the host reads at init and on `GHOSTTY_ACTION_RELOAD_CONFIG`. Upstream's side of those two hunks is empty. Keep the stores.
+
+`limux hooks setup omp` installs `hooks/omp-limux-card.ts`; it registers the
+exact transcript on `session_start` and `session_switch`. The `omp` hook store
+is keyed by tab identity (not cwd or transcript), and restore passes the
+registered path to `omp --resume`. Preserve the binding across window
+shutdown and do not guess from launch flags or select the most recent chat.
+
+The **Save Sessions** toolbar button is available in both header layouts. It
+snapshots agents descended from that GTK process, then saves that window's
+state directly through the same persistence queue as `session.save`. Do not
+route the button's save over a socket another window may already own.
 
 ### Browser check: GBM and a second NVIDIA GPU
 
@@ -135,7 +169,7 @@ Upstream has also edited these since `32dd2a3`. A conflict here is expected. The
 | `rust/limux-ghostty-sys/src/lib.rs` | action sizes 48 / 56; `ghostty_action_program_status_s` | scrollbar asserts; action sizes 24 / 32 | fork sizes; add scrollbar asserts |
 | `rust/limux-host-linux/src/browser_sandbox.rs` | `availability` via `renderer::check`; `terminal_child_env` | async probe module | async API, probe body goes through `renderer::check`; keep `terminal_child_env` |
 | `browser_sandbox/probe.rs` | `check_with(&[(&str, &str)])` | `check_with_cancel`, `LaunchEnv` | env injection and cancel; `renderer` is the host entry |
-| `pane.rs` | `on_program_status`; title callback; status clear on exit | exit-hold `on_close`; title dedup | both, as in the sections above |
+| `pane.rs` | `on_program_status`; full automatic title and title callback; status clear on exit | exit-hold `on_close`; title dedup | both, but deduplicate and store the full title, not the tab preview |
 | `terminal.rs` | shell-integration atomics; `program_status_report` | scrollbar, motion, scrollback helpers inserted in the same gap | both insertions |
 | `window.rs` | card payload fields; indicators forced off; `refresh_workspace_location` from pwd | `group_id` local; indicator visibility flag; pwd change detection | fork fields and hidden indicators; upstream dedup around the refresh |
 | `window/session_persistence.rs` | `named_by_user`, `description`, `group_id` | `favorites.contains` | fork fields; either favorite lookup if it is the same set |

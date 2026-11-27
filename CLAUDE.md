@@ -68,7 +68,7 @@ rg -n "PaneCallbacks \{"                           rust/limux-host-linux/src/win
 | Pane / surface UI state | `rust/limux-host-linux/src/window.rs` (`PaneCallbacks`), `window/` (`session_persistence.rs`, `navigation_notifications.rs`, `sidebar_groups.rs`, `gui_hooks.rs`), `pane/` (`tab_header.rs`, `drag_drop.rs`) |
 | Terminal IME / context menu / keys | `rust/limux-host-linux/src/ime/` (`state.rs`, `routing.rs`, `contexts.rs`) and `rust/limux-host-linux/src/terminal/` (`context_menu.rs`, `input_keys.rs`) |
 | Agent-hook installers + templates | `hooks/` + `limux hooks setup` |
-| Packaging (AppImage / AUR) | `scripts/package.sh`, `scripts/appimage-webkit.sh`, `PKGBUILD.template` |
+| Packaging (AppImage / local Arch) | `scripts/package.sh`, `scripts/appimage-webkit.sh`, `fork/PKGBUILD` |
 
 ## Pitfalls
 

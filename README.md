@@ -99,7 +99,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 Uninstall with `./install.sh --prefix="$HOME/.local" --uninstall`.
 
-**Arch Linux (AUR):**
+**Arch Linux (upstream AUR packages):**
 ```bash
 # Prebuilt release package
 yay -S limux-bin
@@ -248,14 +248,19 @@ Gemini CLI, and Antigravity (`agy`)). Every terminal limux spawns auto-exports
 `LIMUX_TAB_ID` / `LIMUX_SOCKET`, so the CLI auto-targets the right place
 with no flags needed from inside the agent's own terminal.
 
+Click **Save Sessions** next to **Open Folder** in the toolbar to capture
+running agents and save the window's workspace layout. The confirmation shows
+how many agents can be restored and whether any running agents were skipped.
+
 ```bash
 # Fire a libadwaita toast + tab/workspace unread badges from any agent
 limux notify --subtitle "needs review" --body "blocked on auth choice" "Input needed"
 
 # Install Limux session-restore and notification hooks for supported agents
 limux hooks setup
-# Or configure a single agent (codex, claude, gemini, agy, opencode):
-limux hooks setup agy
+# Or configure just the agents you use:
+limux hooks setup claude
+limux hooks setup omp
 
 # Snapshot already-running Limux-hosted agent sessions before a restart/upgrade
 # and flush the host's session.json:
@@ -306,6 +311,8 @@ Each workspace card in the sidebar can carry more than its name, the way cmux
 cards do. Agents, hooks and scripts write it over the socket; inside a Limux
 terminal the commands target their own workspace through `LIMUX_WORKSPACE_ID`.
 
+Long workspace titles wrap to fit the sidebar. Hover over a title to see it in a tooltip.
+
 ```bash
 # Keyed status rows, highest priority first. The flags match `cmux set-status`.
 limux set-status claude Running --icon bolt.fill --color '#5c9cf5' --priority 10
@@ -327,8 +334,10 @@ limux refresh-pr
   `pause.circle.fill`, `bell.fill`, `checkmark`, `arrow.triangle.pull`, ...) or
   up to four characters, and `--color` takes `#rrggbb` or a name.
 - **The description** is saved with the session.
-- **The latest background notification** stays on the card after it is read;
-  only the unread highlight clears. The message is not saved across restarts.
+- **Notifications from `limux notify`** stay on the card after they are read
+  unless `--no-sidebar-preview` is passed. Agent hooks use the unread marker and
+  desktop notification without adding a second status line. Previews aren't
+  saved across restarts.
 - **Session merging.** Automatic title changes do not conflict with edits in
   another window. If both windows make incompatible edits, Limux leaves the
   shared session intact and keeps a recovery file for the other window.
@@ -344,22 +353,28 @@ limux refresh-pr
   prompt or when the tab's process exits; done and error records stay until
   you come back to that tab. Limux answers the protocol's support query, and
   its terminfo lists `Pst`. `LIMUX_DEBUG_PROGRAM_STATUS=1` logs each report.
-- **Agent lifecycle.** The hooks from `limux hooks setup` set a row under the
-  agent's own key: Running when a prompt is submitted, Needs input on a
-  notification, Idle when a turn ends, and remove it when the session ends.
-  After each turn they start `limux refresh-pr` in the background. Opt out with
-  `LIMUX_CARD_STATUS_DISABLED=1` (rows) or `LIMUX_PR_STATUS_DISABLED=1` (PR row).
-- **oh-my-pi (omp).** Copy [`hooks/omp-limux-card.ts`](hooks/omp-limux-card.ts)
-  to `~/.omp/agent/extensions/`. When a turn ends it posts a notification with
-  the start of omp's reply and refreshes the PR row; omp reports its own state
-  over OSC 7501. It does nothing outside Limux.
+- **Agent lifecycle.** The card shows one built-in activity line. It prefers
+  OSC status to hook updates unless a hook reports a more urgent request for
+  input. Passive idle reminders do not count as requests. A completed OSC
+  status clears when you return to the tab. Scripted status rows and PRs stay
+  separate. Opt out with `LIMUX_CARD_STATUS_DISABLED=1` (hook updates) or
+  `LIMUX_PR_STATUS_DISABLED=1` (PR row).
+- **oh-my-pi (omp).** Run `limux hooks setup omp` to install the bundled
+  extension. It remembers each interactive tab's exact saved conversation,
+  even when several tabs use the same folder, and updates the binding after
+  `/resume`, `/new`, or a fork. Limux resumes those conversations in their
+  original tabs after reopening. For an already-running omp tab, reopen the
+  conversation once with `omp --resume` after installing the extension.
+  Verify the binding with `limux hooks snapshot omp --dry-run`.
+  The extension also sends a desktop notification and refreshes the PR row
+  after a turn; omp reports its own status over OSC 7501.
 - `limux --json list-workspaces` includes each workspace's `description`,
   `statuses` and `git_branch`.
 
 Checked-in hook templates live in [`hooks/`](hooks/). They mirror
 `limux hooks setup` for Codex, Claude Code, Gemini CLI, and Antigravity
-(`agy`); OpenCode is omitted from default `limux hooks setup` and can be
-installed explicitly with `limux hooks setup opencode`.
+(`agy`). OpenCode and omp are opt-in via `limux hooks setup opencode` and
+`limux hooks setup omp`.
 
 Coding agents working on **limux itself** should read [`AGENTS.md`](AGENTS.md)
 and [`CLAUDE.md`](CLAUDE.md) in the repo root — those cover the build
