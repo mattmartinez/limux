@@ -194,6 +194,12 @@ impl RestorableAgentState {
         if !self.restore_on_startup {
             return None;
         }
+        // omp can reserve a transcript path before the first message is saved.
+        // Open a shell for an empty or deleted session rather than launching a
+        // failing resume command (or falling back to another conversation).
+        if self.kind == RestorableAgentKind::Omp && !Path::new(&self.session_id).is_file() {
+            return None;
+        }
         build_resume_command(
             self.kind,
             &self.session_id,
@@ -941,7 +947,7 @@ fn wrap_restored_agent_command(
     )
 }
 
-fn limux_cli_executable() -> String {
+pub(crate) fn limux_cli_executable() -> String {
     if let Some(path) = limux_control::flatpak::host_cli_executable() {
         return path.to_string_lossy().into_owned();
     }
@@ -1742,6 +1748,53 @@ mod tests {
                 .expect("agent of the moved tab");
             assert_eq!(agent.session_id, "b-newest");
         }
+    }
+
+    #[test]
+    fn omp_hook_state_restores_each_tabs_own_transcript_from_the_same_folder() {
+        let dir = tempdir().expect("tempdir");
+        let path_a = dir.path().join("first session.jsonl");
+        let path_b = dir.path().join("second session.jsonl");
+        let fresh = dir.path().join("not yet written.jsonl");
+        fs::write(&path_a, "{}\n").unwrap();
+        fs::write(&path_b, "{}\n").unwrap();
+        let record = |path: &Path, surface_id| {
+            serde_json::json!({
+                "session_id": path,
+                "workspace_id": "workspace-a",
+                "surface_id": surface_id,
+                "cwd": dir.path(),
+                "updated_at": 10.0
+            })
+        };
+        fs::write(
+            dir.path().join("omp-hook-sessions.json"),
+            serde_json::json!({
+                "sessions": {
+                    "tab-a": record(&path_a, "42:tab-a"),
+                    "tab-b": record(&path_b, "42:tab-b"),
+                    "tab-fresh": record(&fresh, "42:tab-fresh")
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let index = RestorableAgentIndex::load_from_dir(dir.path());
+        for (tab, path) in [("tab-a", path_a), ("tab-b", path_b)] {
+            let agent = index
+                .agent_for_surface("workspace-a", Some(42), tab)
+                .unwrap();
+            assert_eq!(agent.kind, RestorableAgentKind::Omp);
+            assert!(agent
+                .resume_command(true)
+                .unwrap()
+                .contains(&format!("'omp' '--resume' '{}'", path.display())));
+        }
+        assert!(index
+            .agent_for_surface("workspace-a", Some(42), "tab-fresh")
+            .unwrap()
+            .resume_command(true)
+            .is_none());
     }
 
     #[test]

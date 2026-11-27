@@ -125,20 +125,153 @@ fn report_session_save_notice(state: &State, notice: SessionSaveNotice, detail: 
     show_runtime_error(state, "Session could not be merged", detail);
 }
 
-pub(super) fn save_session_for_rpc(
+pub(super) enum SessionSaveWaiter {
+    Rpc(std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>),
+    Toolbar {
+        button: glib::WeakRef<gtk::Button>,
+        feedback: glib::WeakRef<adw::ToastOverlay>,
+        skipped: usize,
+    },
+}
+
+impl SessionSaveWaiter {
+    fn complete(self, result: &crate::control_bridge::BridgeResult) {
+        match self {
+            Self::Rpc(reply) => {
+                let _ = reply.send(result.clone());
+            }
+            Self::Toolbar {
+                button,
+                feedback,
+                skipped,
+            } => {
+                if let Some(button) = button.upgrade() {
+                    button.set_sensitive(true);
+                }
+                if let Some(feedback) = feedback.upgrade() {
+                    let title = match result {
+                        Ok(saved) => {
+                            let count = &saved["restorable_agents"];
+                            if skipped == 0 {
+                                format!("Sessions saved · {count} ready to restore")
+                            } else {
+                                format!(
+                                    "Sessions saved · {count} ready to restore, {skipped} skipped"
+                                )
+                            }
+                        }
+                        Err(_) => "Sessions could not be saved".into(),
+                    };
+                    feedback.add_toast(adw::Toast::new(&title));
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn connect_save_sessions_button(
     state: &State,
-    reply: std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>,
+    button: &gtk::Button,
+    feedback: &adw::ToastOverlay,
 ) {
+    let state = Rc::downgrade(state);
+    let feedback = feedback.downgrade();
+    button.connect_clicked(move |button| {
+        if !button.is_sensitive() {
+            return;
+        }
+        button.set_sensitive(false);
+        let button = button.downgrade();
+        let state = state.clone();
+        let feedback = feedback.clone();
+        glib::spawn_future_local(async move {
+            let result = snapshot_window_agents().await;
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(skipped) => save_session_with_reply(
+                    &state,
+                    SessionSaveWaiter::Toolbar {
+                        button,
+                        feedback,
+                        skipped,
+                    },
+                ),
+                Err(error) => {
+                    if let Some(button) = button.upgrade() {
+                        button.set_sensitive(true);
+                    }
+                    if !state.borrow().persistence_suspended {
+                        show_runtime_error(&state, "Could not capture agent sessions", &error);
+                    }
+                }
+            }
+        });
+    });
+}
+
+async fn snapshot_window_agents() -> Result<usize, String> {
+    use std::ffi::OsStr;
+
+    #[derive(serde::Deserialize)]
+    struct SnapshotReport {
+        skipped: Vec<serde::de::IgnoredAny>,
+    }
+
+    // Reuse the CLI's agent detection without sending a save RPC: two windows
+    // can share a socket path, but only this window owns the state we're saving.
+    let cli = if std::env::var_os("FLATPAK_ID").as_deref() == Some(OsStr::new(crate::APP_ID)) {
+        "/app/bin/limux".into()
+    } else {
+        layout_state::limux_cli_executable()
+    };
+    let pid = std::process::id().to_string();
+    let args = [
+        cli.as_str(),
+        "--json",
+        "hooks",
+        "snapshot",
+        "--window-pid",
+        &pid,
+    ]
+    .map(OsStr::new);
+    let launcher = gio::SubprocessLauncher::new(
+        gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_PIPE,
+    );
+    let process = launcher
+        .spawn(&args)
+        .map_err(|error| format!("Could not start the Limux CLI: {error}"))?;
+    let (stdout, stderr) = process
+        .communicate_utf8_future(None)
+        .await
+        .map_err(|error| format!("Could not read the snapshot result: {error}"))?;
+    if !process.is_successful() {
+        let detail = stderr.as_deref().unwrap_or_default().trim();
+        return Err(if detail.is_empty() {
+            "The Limux snapshot command failed.".into()
+        } else {
+            detail.to_owned()
+        });
+    }
+    let report: SnapshotReport = serde_json::from_str(stdout.as_deref().unwrap_or_default())
+        .map_err(|error| format!("Invalid snapshot result: {error}"))?;
+    Ok(report.skipped.len())
+}
+
+pub(super) fn save_session_with_reply(state: &State, reply: SessionSaveWaiter) {
     {
         let mut s = state.borrow_mut();
         if s.persistence_suspended {
-            let _ = reply.send(Err(crate::control_bridge::BridgeError::conflict(
+            drop(s);
+            reply.complete(&Err(crate::control_bridge::BridgeError::conflict(
                 "session persistence is suspended",
             )));
             return;
         }
         if s.session_close_dialog_open {
-            let _ = reply.send(Err(crate::control_bridge::BridgeError::conflict(
+            drop(s);
+            reply.complete(&Err(crate::control_bridge::BridgeError::conflict(
                 "session close dialog is open",
             )));
             return;
@@ -149,16 +282,17 @@ pub(super) fn save_session_for_rpc(
 }
 
 fn reject_session_save_waiters(
-    waiters: Vec<std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>>,
+    waiters: Vec<SessionSaveWaiter>,
     error: crate::control_bridge::BridgeError,
 ) {
+    let response = Err(error);
     for waiter in waiters {
-        let _ = waiter.send(Err(error.clone()));
+        waiter.complete(&response);
     }
 }
 
 fn notify_session_save_waiters(
-    waiters: Vec<std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>>,
+    waiters: Vec<SessionSaveWaiter>,
     result: &Result<crate::session_store::SaveOutcome, String>,
 ) {
     if waiters.is_empty() {
@@ -183,7 +317,7 @@ fn notify_session_save_waiters(
         ))),
     };
     for waiter in waiters {
-        let _ = waiter.send(response.clone());
+        waiter.complete(&response);
     }
 }
 
@@ -219,7 +353,7 @@ pub(super) fn save_session_now(state: &State) {
                 None => {
                     // The in-flight writer owns the store and its merge ancestry.
                     // Its completion captures the latest GTK state before saving again,
-                    // carrying any queued RPC waiters onto that fresh save.
+                    // carrying any queued waiters onto that fresh save.
                     s.save_queued = true;
                     return;
                 }
@@ -452,11 +586,10 @@ pub(super) fn stop_session_saves_for_shutdown(state: &State) {
         }
         std::mem::take(&mut s.session_save_waiters)
     };
-    for waiter in waiters {
-        let _ = waiter.send(Err(crate::control_bridge::BridgeError::conflict(
-            "window is closing",
-        )));
-    }
+    reject_session_save_waiters(
+        waiters,
+        crate::control_bridge::BridgeError::conflict("window is closing"),
+    );
 }
 
 pub(super) fn apply_loaded_session(state: &State, mut loaded: LoadedSession) {
@@ -645,7 +778,7 @@ mod tests {
             restorable_agents: 1,
         };
         notify_session_save_waiters(
-            vec![tx_ok],
+            vec![SessionSaveWaiter::Rpc(tx_ok)],
             &Ok(crate::session_store::SaveOutcome::Saved(summary)),
         );
         let payload = rx_ok.try_recv().expect("saved reply").expect("ok payload");
@@ -657,7 +790,7 @@ mod tests {
 
         let (tx_conflict, rx_conflict) = std::sync::mpsc::channel();
         notify_session_save_waiters(
-            vec![tx_conflict],
+            vec![SessionSaveWaiter::Rpc(tx_conflict)],
             &Ok(crate::session_store::SaveOutcome::Conflict {
                 recovery: PathBuf::from("/tmp/recovery.json"),
                 workspaces: vec!["ws-1".to_string()],
@@ -672,7 +805,7 @@ mod tests {
 
         let (tx_dialog, rx_dialog) = std::sync::mpsc::channel();
         reject_session_save_waiters(
-            vec![tx_dialog],
+            vec![SessionSaveWaiter::Rpc(tx_dialog)],
             crate::control_bridge::BridgeError::conflict("session close dialog is open"),
         );
         let dialog_err = rx_dialog

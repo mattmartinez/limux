@@ -2,8 +2,8 @@
 
 These templates wire supported coding-agent hook systems into Limux session
 restore tracking and completion notifications. Default setup covers Codex,
-Claude Code, Gemini CLI, and Antigravity (`agy`); OpenCode remains opt-in via
-`limux hooks setup opencode`.
+Claude Code, Gemini CLI, and Antigravity (`agy`). OpenCode and omp are opt-in
+via `limux hooks setup opencode` and `limux hooks setup omp`.
 
 The preferred install path is the CLI installer:
 
@@ -19,6 +19,7 @@ That writes the equivalent configuration into each agent's user config:
 | Claude Code | `$CLAUDE_CONFIG_DIR/settings.json` or `~/.claude/settings.json` |
 | Gemini CLI | `$GEMINI_CLI_HOME/.gemini/settings.json` or `~/.gemini/settings.json` |
 | Antigravity (`agy`) | `~/.gemini/config/hooks.json` |
+| oh-my-pi (`omp`) | `~/.omp/agent/extensions/limux-card.ts` (honors `PI_CODING_AGENT_DIR` and `PI_CONFIG_DIR`) |
 
 `limux hooks setup` and `limux hooks uninstall` change only the handlers that
 Limux wrote. They keep your other handlers and settings, follow a symlinked
@@ -42,6 +43,14 @@ LIMUX_CLAUDE_HOOKS_DISABLED=1
 LIMUX_GEMINI_HOOKS_DISABLED=1
 LIMUX_AGY_HOOKS_DISABLED=1
 ```
+
+For an omp process that was running before setup, reopen the conversation
+once with `omp --resume` so it loads the extension. The extension registers
+the exact transcript for that tab on startup and session switches.
+`limux hooks snapshot omp --dry-run` lists running sessions with a
+registered, saved transcript; Limux does not guess from the project folder.
+Use `LIMUX_OMP_HOOKS_DISABLED=1` to disable registration without disabling the
+card notifications.
 
 ## Snapshotting already-running agent sessions
 

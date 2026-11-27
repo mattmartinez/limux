@@ -199,12 +199,16 @@ check "restored agent tab: shell left POSIX mode and read its startup files" \
 # prompt sets that to the folder (\w). The path row then hides its echo.
 check "unnamed workspace takes the terminal's title" "[ \"\$(jq -r .title <<<'$J3')\" = '~/work/demo-repo' ]"
 shot 06-restored-agent-tab
-# An agent's spinner frame is dropped, so its animated title is one name.
-cli send 'printf "\033]2;\342\240\202 Smoke task\007"; sleep 4' >/dev/null && cli send-key Enter >/dev/null
+# The card uses the full OSC title, not the tab strip's shortened preview.
+# A title suffix change must refresh the card even when that preview is unchanged.
+cli send 'printf "\033]2;\342\240\202 Smoke task with a common prefix: first suffix\007"; sleep 2; printf "\033]2;\342\240\202 Smoke task with a common prefix: second suffix\007"; sleep 2' >/dev/null && cli send-key Enter >/dev/null
+sleep 1
+check "workspace title keeps the full OSC text without the spinner" \
+  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task with a common prefix: first suffix' ]"
+sleep 2
+check "a changed title suffix updates the workspace even if the tab preview is unchanged" \
+  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task with a common prefix: second suffix' ]"
 sleep 1.5
-check "a spinner frame is dropped from the title" \
-  "[ \"\$(cli --json list-workspaces | jq -r '.workspaces[0].title')\" = 'Smoke task' ]"
-sleep 3
 # A name the user chose stays, and is saved as theirs.
 cli rename-workspace --workspace "$(jq -r .ref <<<"$J3")" "Pinned name" >/dev/null
 cli send 'cd ~' >/dev/null && cli send-key Enter >/dev/null

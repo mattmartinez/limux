@@ -425,6 +425,7 @@ for regression in \
   settings_editor::terminal_font_group::tests::terminal_font_controls_update_auto_style_rollback_and_reset \
   window::terminal_font_tests::terminal_font_config_updates_live_and_new_ghostty_surfaces \
   window::tests::hidden_workspace_path_does_not_reserve_sidebar_row_height \
+  window::tests::workspace_card_title_wraps_and_has_literal_hover_text \
   terminal::tests::submenu_popovers_never_grab \
   terminal::tests::clipboard_toast_never_retains_its_terminal \
   terminal::tests::repeated_copies_show_a_single_clipboard_toast \

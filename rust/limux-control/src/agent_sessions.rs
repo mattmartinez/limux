@@ -10,6 +10,8 @@ pub const ALLOWED_AGENT_ENV_VARS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL",
+    "PI_CODING_AGENT_DIR",
+    "PI_CONFIG_DIR",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -20,15 +22,17 @@ pub enum AgentKind {
     OpenCode,
     Gemini,
     Agy,
+    Omp,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
         Self::OpenCode,
         Self::Gemini,
         Self::Agy,
+        Self::Omp,
     ];
 
     pub fn from_hook_name(name: &str) -> Option<Self> {
@@ -38,6 +42,7 @@ impl AgentKind {
             "opencode" | "open-code" => Some(Self::OpenCode),
             "gemini" | "gemini-cli" => Some(Self::Gemini),
             "agy" | "antigravity" | "antigravity-cli" => Some(Self::Agy),
+            "omp" | "oh-my-pi" => Some(Self::Omp),
             _ => None,
         }
     }
@@ -49,6 +54,7 @@ impl AgentKind {
             Self::OpenCode => "opencode",
             Self::Gemini => "gemini",
             Self::Agy => "agy",
+            Self::Omp => "omp",
         }
     }
 
@@ -59,6 +65,7 @@ impl AgentKind {
             Self::OpenCode => "opencode-hook-sessions.json",
             Self::Gemini => "gemini-hook-sessions.json",
             Self::Agy => "agy-hook-sessions.json",
+            Self::Omp => "omp-hook-sessions.json",
         }
     }
 
@@ -69,6 +76,7 @@ impl AgentKind {
             Self::OpenCode => "OpenCode",
             Self::Gemini => "Gemini",
             Self::Agy => "Antigravity",
+            Self::Omp => "oh-my-pi",
         }
     }
 
@@ -79,6 +87,7 @@ impl AgentKind {
             Self::OpenCode => "opencode",
             Self::Gemini => "gemini",
             Self::Agy => "agy",
+            Self::Omp => "omp",
         }
     }
 
@@ -89,6 +98,7 @@ impl AgentKind {
             Self::OpenCode => &["opencode"],
             Self::Gemini => &["gemini"],
             Self::Agy => &["agy", "antigravity"],
+            Self::Omp => &["omp", "oh-my-pi"],
         }
     }
 }
@@ -276,6 +286,9 @@ pub fn build_resume_invocation(
     cwd: Option<&str>,
 ) -> Option<(Option<String>, String)> {
     let session_id = normalized(session_id)?;
+    if kind == AgentKind::Omp && !Path::new(&session_id).is_absolute() {
+        return None;
+    }
     let fallback = kind.fallback_executable().to_string();
     let raw_args = launch
         .map(|launch| launch.arguments.clone())
@@ -314,7 +327,7 @@ pub fn build_resume_invocation(
             parts.push(session_id);
             parts.extend(preserved_tail);
         }
-        AgentKind::Claude | AgentKind::Gemini => {
+        AgentKind::Claude | AgentKind::Gemini | AgentKind::Omp => {
             parts.push("--resume".to_string());
             parts.push(session_id);
             parts.extend(preserved_tail);
@@ -456,6 +469,10 @@ fn resume_selector_takes_value(kind: AgentKind, arg: &str) -> bool {
         AgentKind::OpenCode => arg == "--session" || arg == "-s",
         AgentKind::Claude | AgentKind::Gemini => arg == "--resume" || arg == "-r",
         AgentKind::Agy => arg == "--conversation",
+        AgentKind::Omp => matches!(
+            arg,
+            "--resume" | "-r" | "--session" | "--restore" | "--fork" | "--cwd"
+        ),
     }
 }
 
@@ -467,6 +484,12 @@ fn resume_selector_flag_or_assignment(kind: AgentKind, arg: &str) -> bool {
             arg.starts_with("--resume=") || arg == "--continue" || arg == "-c"
         }
         AgentKind::Agy => arg.starts_with("--conversation=") || arg == "--continue" || arg == "-c",
+        AgentKind::Omp => {
+            matches!(arg, "--continue" | "-c")
+                || ["--resume=", "--session=", "--restore=", "--fork=", "--cwd="]
+                    .iter()
+                    .any(|prefix| arg.starts_with(prefix))
+        }
     }
 }
 
@@ -793,6 +816,37 @@ mod tests {
             command,
             "cd '/tmp/repo' && '/opt/bin/agy' '--conversation' 'conv-abc' '--model' 'gemini-2.5-pro' '--remote-control'"
         );
+    }
+
+    #[test]
+    fn omp_resume_uses_the_registered_file_and_not_old_launch_selectors() {
+        let launch = AgentLaunchCommand {
+            executable: "/opt/bin/omp".to_string(),
+            arguments: vec_str(&[
+                "omp",
+                "--session",
+                "/old.jsonl",
+                "--cwd=/old/project",
+                "--model",
+                "my-model",
+                "--continue",
+                "original prompt",
+            ]),
+            cwd: Some("/old/project".to_string()),
+            environment: BTreeMap::from([("PI_CODING_AGENT_DIR".into(), "/tmp/omp home".into())]),
+            captured_at: None,
+        };
+        assert_eq!(
+            build_resume_command(
+                AgentKind::Omp,
+                "/sessions/review's task.jsonl",
+                Some(&launch),
+                Some("/new/project"),
+            )
+            .as_deref(),
+            Some("cd '/new/project' && 'env' 'PI_CODING_AGENT_DIR=/tmp/omp home' '/opt/bin/omp' '--resume' '/sessions/review'\\''s task.jsonl' '--model' 'my-model'"),
+        );
+        assert!(build_resume_command(AgentKind::Omp, "ambiguous-id", None, None).is_none());
     }
 
     #[test]

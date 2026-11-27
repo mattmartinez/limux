@@ -70,6 +70,7 @@ pub(crate) struct SnapshotOptions {
     pub(crate) agent: Option<AgentKind>,
     pub(crate) workspace_id: Option<String>,
     pub(crate) surface_id: Option<String>,
+    pub(crate) window_pid: Option<u32>,
     pub(crate) target_socket: Option<PathBuf>,
     pub(crate) all_sockets: bool,
     pub(crate) dry_run: bool,
@@ -152,6 +153,12 @@ fn snapshot_from_probes(
         let Some(kind) = detect_agent_kind(&probe.args, probe.comm.as_deref()) else {
             continue;
         };
+        if options
+            .window_pid
+            .is_some_and(|window| !has_process_ancestor(probe.pid, ppid_map, |pid| pid == window))
+        {
+            continue;
+        }
         let Some(workspace_id) = env_value(&probe.environ, "LIMUX_WORKSPACE_ID") else {
             continue;
         };
@@ -199,7 +206,11 @@ fn snapshot_from_probes(
                 .session_for_live_pid(probe.pid, &workspace_id, &surface_id)?
                 .map(|session_id| (session_id, SessionIdSource::ExistingHookStore))
                 .or(extracted),
-        };
+        }
+        .filter(|(session_id, _)| {
+            // A fresh omp session has a path before its transcript is written.
+            kind != AgentKind::Omp || Path::new(session_id).is_file()
+        });
         resolved.push(ResolvedCandidate {
             candidate: MatchedCandidate {
                 kind,
@@ -361,18 +372,18 @@ fn snapshot_from_probes(
             continue;
         }
 
-        let store = store_for(candidate.kind);
-        let proc_env = allowed_env_from_environ(&candidate.probe.environ);
-        let launch_command = launch_record_from_process(
-            candidate.kind,
-            Some(&candidate.probe.args),
-            candidate.probe.cwd.as_deref(),
-            Some(&proc_env),
-        );
-
-        let superseded = if options.dry_run {
+        let superseded = if options.dry_run || candidate.kind == AgentKind::Omp {
+            // An omp extension owns the binding; don't race it on /resume or /new.
             Vec::new()
         } else {
+            let store = store_for(candidate.kind);
+            let proc_env = allowed_env_from_environ(&candidate.probe.environ);
+            let launch_command = launch_record_from_process(
+                candidate.kind,
+                Some(&candidate.probe.args),
+                candidate.probe.cwd.as_deref(),
+                Some(&proc_env),
+            );
             store.upsert_snapshot(AgentHookSessionRecord {
                 session_id: session_id.clone(),
                 workspace_id: candidate.workspace_id.clone(),
@@ -452,21 +463,33 @@ fn has_ancestor_on_same_surface(
     candidate_info: &HashMap<u32, (&str, &str, bool)>,
     require_session: bool,
 ) -> bool {
-    let mut visited = HashSet::new();
-    let mut current = pid;
-    while visited.insert(current) {
-        let Some(&parent) = ppid_map.get(&current) else {
+    has_process_ancestor(pid, ppid_map, |parent| {
+        candidate_info
+            .get(&parent)
+            .is_some_and(|&(ws, surf, has_session)| {
+                ws == workspace_id && surf == surface_id && (!require_session || has_session)
+            })
+    })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn has_process_ancestor(
+    mut pid: u32,
+    parents: &HashMap<u32, u32>,
+    matches: impl Fn(u32) -> bool,
+) -> bool {
+    // Bound the walk even if the live process table changed during the scan.
+    for _ in 0..parents.len() {
+        let Some(&parent) = parents.get(&pid) else {
             break;
         };
-        if parent <= 1 || parent == current {
+        if parent <= 1 || parent == pid {
             break;
         }
-        if let Some(&(ws, surf, has_session)) = candidate_info.get(&parent) {
-            if ws == workspace_id && surf == surface_id && (!require_session || has_session) {
-                return true;
-            }
+        if matches(parent) {
+            return true;
         }
-        current = parent;
+        pid = parent;
     }
     false
 }
@@ -474,12 +497,13 @@ fn has_ancestor_on_same_surface(
 #[cfg(any(target_os = "linux", test))]
 fn detect_agent_kind(args: &[String], comm: Option<&str>) -> Option<AgentKind> {
     // Check Agy before Gemini because Antigravity installs under `~/.gemini/antigravity-cli`.
-    const DETECTION_ORDER: [AgentKind; 5] = [
+    const DETECTION_ORDER: [AgentKind; 6] = [
         AgentKind::Agy,
         AgentKind::Claude,
         AgentKind::Codex,
         AgentKind::OpenCode,
         AgentKind::Gemini,
+        AgentKind::Omp,
     ];
     DETECTION_ORDER
         .into_iter()
@@ -494,6 +518,11 @@ fn extract_session_id(
     open_paths: &[PathBuf],
     read_file_prefix: &impl Fn(&Path) -> Option<String>,
 ) -> Option<(String, SessionIdSource)> {
+    // omp can switch conversations in-process; launch flags and unrelated open
+    // files cannot identify its current transcript. Use the hook record only.
+    if kind == AgentKind::Omp {
+        return None;
+    }
     // Open file descriptors reflect the currently active session even if a
     // resumed process later switched conversations inside the same TUI.
     if let Some(session_id) = extract_session_id_from_open_paths(kind, open_paths, read_file_prefix)
@@ -516,7 +545,7 @@ fn extract_session_id_from_env(kind: AgentKind, environ: &[u8]) -> Option<String
         AgentKind::Codex => &["CODEX_THREAD_ID", "CODEX_SESSION_ID"],
         AgentKind::Gemini => &["GEMINI_SESSION_ID"],
         AgentKind::OpenCode => &["OPENCODE_SESSION_ID"],
-        AgentKind::Agy => &[],
+        AgentKind::Agy | AgentKind::Omp => &[],
     };
     vars.iter().find_map(|name| env_value(environ, name))
 }
@@ -538,6 +567,7 @@ fn extract_session_id_from_cmdline(kind: AgentKind, raw_args: &[String]) -> Opti
         AgentKind::Codex => {
             extract_flag_value(args, &["--resume"]).or_else(|| extract_codex_resume_arg(args))
         }
+        AgentKind::Omp => None,
     }
 }
 
@@ -697,7 +727,7 @@ fn extract_session_id_from_open_paths(
             .iter()
             .rev()
             .find_map(|path| extract_gemini_chat_session_id(path, read_file_prefix)),
-        AgentKind::OpenCode => None,
+        AgentKind::OpenCode | AgentKind::Omp => None,
     }
 }
 
@@ -1206,6 +1236,60 @@ mod tests {
     }
 
     #[test]
+    fn omp_snapshot_reports_only_registered_live_transcripts() {
+        let dir = tempdir().unwrap();
+        let store = AgentHookSessionStore::new_for_dir("omp", dir.path());
+        let path = dir.path().join("active.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+        store
+            .update("a", |_| AgentHookSessionRecord {
+                session_id: path.to_string_lossy().into_owned(),
+                workspace_id: "workspace".into(),
+                surface_id: "1:a".into(),
+                cwd: Some("/repo".into()),
+                pid: Some(100),
+                launch_command: None,
+                updated_at: 1.0,
+            })
+            .unwrap();
+        let probe = |pid, surface| ProcessProbe {
+            pid,
+            args: vec_str(&["omp", "--resume", "/previous.jsonl"]),
+            comm: Some("omp".into()),
+            cwd: Some("/repo".into()),
+            environ: encode_env(&[
+                ("LIMUX_WORKSPACE_ID", "workspace"),
+                ("LIMUX_SURFACE_ID", surface),
+            ]),
+            open_paths: vec![PathBuf::from("/previous.jsonl")],
+        };
+        let report = snapshot_from_probes(
+            vec![probe(100, "1:a"), probe(101, "1:b"), probe(102, "1:c")],
+            &HashMap::from([(100, 62), (62, 50), (101, 50), (102, 51)]),
+            &SnapshotOptions {
+                agent: Some(AgentKind::Omp),
+                workspace_id: None,
+                surface_id: None,
+                window_pid: Some(50),
+                target_socket: None,
+                all_sockets: false,
+                dry_run: false,
+            },
+            |_| AgentHookSessionStore::new_for_dir("omp", dir.path()),
+            &no_file_read,
+        )
+        .unwrap();
+        assert_eq!(report.captured.len(), 1);
+        assert_eq!(report.captured[0].session_id, path.to_str().unwrap());
+        assert_eq!(
+            report.captured[0].source,
+            SessionIdSource::ExistingHookStore
+        );
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].surface_id, "1:b");
+    }
+
+    #[test]
     fn snapshot_deduplicates_nested_agents_supersedes_stale_records_and_respects_filters() {
         let dir = tempdir().expect("tempdir");
         let agy_store = AgentHookSessionStore::new_for_dir("agy", dir.path());
@@ -1314,6 +1398,7 @@ mod tests {
             agent: None,
             workspace_id: None,
             surface_id: None,
+            window_pid: None,
             target_socket: Some(PathBuf::from("/tmp/target.sock")),
             all_sockets: false,
             dry_run: false,
@@ -1392,6 +1477,7 @@ mod tests {
             agent: None,
             workspace_id: None,
             surface_id: None,
+            window_pid: None,
             target_socket: None,
             all_sockets: true,
             dry_run: true,
@@ -1480,6 +1566,7 @@ mod tests {
             agent: Some(AgentKind::Codex),
             workspace_id: None,
             surface_id: None,
+            window_pid: None,
             target_socket: None,
             all_sockets: true,
             dry_run: true,
@@ -1557,6 +1644,7 @@ mod tests {
             agent: None,
             workspace_id: None,
             surface_id: None,
+            window_pid: None,
             target_socket: None,
             all_sockets: true,
             dry_run: false,

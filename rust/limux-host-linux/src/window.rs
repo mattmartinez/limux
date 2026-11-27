@@ -121,6 +121,7 @@ pub(crate) struct AppState {
     sidebar_toggle: Option<gtk::ToggleButton>,
     top_bar_new_ws_btn_ref: Option<gtk::Button>,
     top_bar_open_folder_btn_ref: Option<gtk::Button>,
+    top_bar_save_sessions_btn: gtk::Button,
     top_bar_settings_btn: Option<gtk::Button>,
     sidebar_header: gtk::Box,
     sidebar_header_handle: gtk::WindowHandle,
@@ -157,7 +158,7 @@ pub(crate) struct AppState {
     save_queued: bool,
     session_save_timer: Option<glib::SourceId>,
     session_store: Result<Option<crate::session_store::SessionStore>, String>,
-    session_save_waiters: Vec<std::sync::mpsc::Sender<crate::control_bridge::BridgeResult>>,
+    session_save_waiters: Vec<SessionSaveWaiter>,
     session_save_notice: Option<session_persistence::SessionSaveNotice>,
     session_close_dialog_open: bool,
     session_close_pending: Option<PendingSessionClose>,
@@ -2067,6 +2068,15 @@ pub fn build_window(app: &adw::Application) {
     top_bar_content.append(&open_folder);
     top_bar_open_folder_btn = open_folder;
 
+    let save_sessions = gtk::Button::from_icon_name("document-save-symbolic");
+    save_sessions.add_css_class("flat");
+    save_sessions.add_css_class("limux-top-bar-btn");
+    save_sessions.set_focus_on_click(false);
+    save_sessions.set_valign(gtk::Align::Center);
+    save_sessions.set_tooltip_text(Some("Save Sessions"));
+    save_sessions.update_property(&[gtk::accessible::Property::Label("Save Sessions")]);
+    top_bar_content.append(&save_sessions);
+
     // Workspace indicator pills (takes the rest of the space)
     top_bar_content.append(&indicator_scroll);
 
@@ -2228,7 +2238,9 @@ pub fn build_window(app: &adw::Application) {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     vbox.append(&header);
     vbox.append(&main_split);
-    window.set_content(Some(&vbox));
+    let feedback = adw::ToastOverlay::new();
+    feedback.set_child(Some(&vbox));
+    window.set_content(Some(&feedback));
 
     let state: State = Rc::new(RefCell::new(AppState {
         app: app.clone(),
@@ -2241,6 +2253,7 @@ pub fn build_window(app: &adw::Application) {
         sidebar_toggle: Some(sidebar_toggle),
         top_bar_new_ws_btn_ref: Some(top_bar_new_ws_btn.clone()),
         top_bar_open_folder_btn_ref: Some(top_bar_open_folder_btn.clone()),
+        top_bar_save_sessions_btn: save_sessions.clone(),
         top_bar_settings_btn: Some(top_bar_settings_btn.clone()),
         sidebar_header: sidebar_header.clone(),
         sidebar_header_handle: sidebar_header_handle.clone(),
@@ -2296,6 +2309,7 @@ pub fn build_window(app: &adw::Application) {
     CONTROL_STATE.with(|slot| {
         *slot.borrow_mut() = Some(state.clone());
     });
+    connect_save_sessions_button(&state, &save_sessions, &feedback);
 
     {
         let state = state.clone();
@@ -3979,6 +3993,7 @@ struct TopBarWidgets {
     settings: gtk::Button,
     new_ws: gtk::Button,
     open_folder: gtk::Button,
+    save_sessions: gtk::Button,
     minimize: gtk::Button,
     maximize: gtk::Button,
     close: gtk::Button,
@@ -4032,6 +4047,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
             settings,
             new_ws,
             open_folder,
+            save_sessions: s.top_bar_save_sessions_btn.clone(),
             minimize,
             maximize,
             close,
@@ -4106,6 +4122,7 @@ fn apply_top_bar_mode_impl(state: &State, allow_retry: bool) {
     detach(&widgets.settings);
     detach(&widgets.new_ws);
     detach(&widgets.open_folder);
+    detach(&widgets.save_sessions);
     detach(&widgets.minimize);
     detach(&widgets.maximize);
     detach(&widgets.close);
@@ -4138,6 +4155,7 @@ fn collapsed_dock_layout_matches(leading: &gtk::Box, widgets: &TopBarWidgets) ->
         && widgets.settings.parent().is_none()
         && widgets.new_ws.parent().is_none()
         && widgets.open_folder.parent().is_none()
+        && widgets.save_sessions.parent().is_none()
         && widgets.minimize.parent().is_none()
         && widgets.maximize.parent().is_none()
         && widgets.close.parent().is_none()
@@ -4160,6 +4178,7 @@ fn toolbar_layout_matches(
             widgets.settings.upcast_ref(),
             widgets.new_ws.upcast_ref(),
             widgets.open_folder.upcast_ref(),
+            widgets.save_sessions.upcast_ref(),
             widgets.minimize.upcast_ref(),
             widgets.maximize.upcast_ref(),
             widgets.close.upcast_ref(),
@@ -4170,12 +4189,13 @@ fn toolbar_layout_matches(
 
 /// Classic layout: everything back in the top bar, controls at the chosen side.
 fn layout_top_bar_visible(w: &TopBarWidgets, controls_side: app_config::WindowControlsSide) {
-    // dock | settings | new_ws | open_folder | [controls at side]
+    // dock | settings | new_ws | open_folder | save | [controls at side]
     // Workspace pills stay off this bar; the sidebar cards are the list.
     w.content.append(&w.dock);
     w.content.append(&w.settings);
     w.content.append(&w.new_ws);
     w.content.append(&w.open_folder);
+    w.content.append(&w.save_sessions);
 
     match controls_side {
         app_config::WindowControlsSide::Left => {
@@ -4209,7 +4229,7 @@ fn layout_sidebar_header(w: &TopBarWidgets, controls_side: app_config::WindowCon
 
     match controls_side {
         app_config::WindowControlsSide::Left => {
-            // close | min | max || spacer || dock | settings | + | folder
+            // close | min | max || spacer || dock | settings | + | folder | save
             w.sidebar_header.append(&w.close);
             w.sidebar_header.append(&w.minimize);
             w.sidebar_header.append(&w.maximize);
@@ -4218,13 +4238,15 @@ fn layout_sidebar_header(w: &TopBarWidgets, controls_side: app_config::WindowCon
             w.sidebar_header.append(&w.settings);
             w.sidebar_header.append(&w.new_ws);
             w.sidebar_header.append(&w.open_folder);
+            w.sidebar_header.append(&w.save_sessions);
         }
         app_config::WindowControlsSide::Right => {
-            // dock | settings | + | folder || spacer || min | max | close
+            // dock | settings | + | folder | save || spacer || min | max | close
             w.sidebar_header.append(&w.dock);
             w.sidebar_header.append(&w.settings);
             w.sidebar_header.append(&w.new_ws);
             w.sidebar_header.append(&w.open_folder);
+            w.sidebar_header.append(&w.save_sessions);
             w.sidebar_header.append(&spacer);
             w.sidebar_header.append(&w.minimize);
             w.sidebar_header.append(&w.maximize);
@@ -4429,7 +4451,9 @@ fn build_sidebar_row(
         .label(name)
         .xalign(0.0)
         .hexpand(true)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .tooltip_text(name)
         .build();
     name_label.add_css_class("limux-ws-name");
 
@@ -4673,6 +4697,7 @@ fn refresh_workspace_title(workspace: &mut Workspace, reason: &str) {
 /// Show `name` on the card and the indicator pill.
 fn set_workspace_name(workspace: &mut Workspace, name: String) {
     workspace.name_label.set_label(&name);
+    workspace.name_label.set_tooltip_text(Some(&name));
     update_indicator_label(&workspace.indicator_button, &name);
     workspace.name = name;
     sync_workspace_path_echo(workspace);
@@ -5563,9 +5588,7 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
         (workspace.name_label.clone(), workspace.name.clone())
     };
     let workspace_id = workspace_id.to_string();
-    let label_for_commit = label.clone();
     begin_inline_rename(state, &label, &current_name, move |state, next_name| {
-        label_for_commit.set_label(&next_name);
         let mut s = state.borrow_mut();
         if let Some(workspace) = s
             .workspaces
@@ -6752,7 +6775,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             let _ = reply.send(Ok(serde_json::json!({ "presented": true })));
         }
         ControlCommand::SaveSession { reply } => {
-            save_session_for_rpc(state, reply);
+            save_session_with_reply(state, SessionSaveWaiter::Rpc(reply));
         }
         ControlCommand::CurrentWorkspace { reply } => {
             let result = {
@@ -11070,6 +11093,26 @@ mod tests {
         assert!(workspace_path_visible(Some("/workspace"), true));
         assert!(!workspace_path_visible(Some("/workspace"), false));
         assert!(!workspace_path_visible(None, true));
+    }
+
+    #[test]
+    #[ignore = "requires GTK; exercised by xvfb-smoke-test.sh"]
+    fn workspace_card_title_wraps_and_has_literal_hover_text() {
+        gtk::init().expect("initialize GTK");
+        let title = "Review <main> & LongUnbrokenWorkspaceTitleThatMustWrapAtNarrowWidths";
+        let label = super::build_sidebar_row(title, None, false).name_label;
+        let width = 110;
+        let (height, _, _, _) = label.measure(gtk::Orientation::Vertical, width);
+        label.allocate(width, height, -1, None);
+
+        let layout = label.layout();
+        assert!(layout.line_count() > 1, "the title should wrap");
+        assert!(
+            !layout.is_ellipsized(),
+            "wrapping must show the whole title"
+        );
+        assert!(layout.pixel_size().0 <= width, "even long words must fit");
+        assert_eq!(label.tooltip_text().as_deref(), Some(title));
     }
 
     #[test]

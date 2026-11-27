@@ -1,7 +1,7 @@
 // Limux workspace card for oh-my-pi (omp).
 //
-// Install: copy to ~/.omp/agent/extensions/limux-card.ts (or under $OMP_AGENT_DIR).
-// omp loads it at startup. It does nothing outside a Limux terminal.
+// Install: limux hooks setup omp. omp loads this extension at startup.
+// Inside a Limux terminal, remember the exact interactive session for this tab.
 //
 // What it does, inside Limux, when a turn finishes: a notification with the
 // start of omp's last reply, and a background `limux refresh-pr` for the PR
@@ -11,8 +11,8 @@
 // file: omp reports it over OSC 7501 and Limux shows it as the card's
 // `omp · Working` row, the way cmux does.
 //
-// Opt out per process with LIMUX_OMP_CARD_DISABLED=1. Every call has a short
-// timeout and its errors are ignored, so the card can never block or fail a turn.
+// Opt out of restore tracking with LIMUX_OMP_HOOKS_DISABLED=1, or of card
+// notifications with LIMUX_OMP_CARD_DISABLED=1. Calls are time-bounded.
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -68,12 +68,15 @@ function oneLine(text: string, max = 140): string {
 }
 
 // Run `limux <args>` and wait at most CALL_TIMEOUT_MS; never throws.
-function limux(args: string[], detach = false): Promise<void> {
+function limux(
+  args: string[],
+  { detach = false, input }: { detach?: boolean; input?: string } = {},
+): Promise<void> {
   return new Promise((resolve) => {
     let child;
     try {
       child = spawn(process.env.LIMUX_OMP_LIMUX_BIN || "limux", args, {
-        stdio: "ignore",
+        stdio: [input === undefined ? "ignore" : "pipe", "ignore", "ignore"],
         detached: detach,
       });
     } catch {
@@ -97,10 +100,38 @@ function limux(args: string[], detach = false): Promise<void> {
     };
     child.on("error", done);
     child.on("close", done);
+    if (input !== undefined) {
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(input);
+    }
   });
 }
 
 export default function limuxCardExtension(api: ExtensionAPI) {
+  const rememberSession = async (_event: unknown, ctx: ExtensionContext) => {
+    if (
+      process.env.LIMUX_OMP_HOOKS_DISABLED === "1" ||
+      !process.env.LIMUX_WORKSPACE_ID ||
+      !process.env.LIMUX_SURFACE_ID ||
+      !ctx.hasUI ||
+      !process.stdin.isTTY ||
+      isNestedSession(ctx)
+    ) return;
+    const file = ctx.sessionManager.getSessionFile();
+    if (!file) return;
+    // A new session may not have written the file yet. Recording its path now
+    // replaces the old binding; Limux resumes only materialized transcripts.
+    await limux(["hooks", "omp", "restore-session"], {
+      input: JSON.stringify({
+        session_id: path.resolve(ctx.cwd, file),
+        cwd: ctx.cwd,
+        pid: String(process.pid),
+      }),
+    });
+  };
+  api.on("session_start", rememberSession);
+  api.on("session_switch", rememberSession);
+
   api.on("agent_end", async (event, ctx) => {
     if (!enabled() || isNestedSession(ctx)) return;
     // omp ends a turn it is about to continue by itself (auto-retry, queued
@@ -109,6 +140,6 @@ export default function limuxCardExtension(api: ExtensionAPI) {
     const reply = lastAssistantText(event);
     await limux(["notify", "--body", oneLine(reply ?? "turn complete"), "omp finished"]);
     const cwd = firstString(ctx.cwd, process.cwd()) ?? process.cwd();
-    await limux(["refresh-pr", "--cwd", cwd], true);
+    await limux(["refresh-pr", "--cwd", cwd], { detach: true });
   });
 }
