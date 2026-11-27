@@ -112,6 +112,12 @@ Automatic title-only changes are safe to ignore when another window edits or del
 
 `refresh_workspace_location`. Once a shell reports a directory, the card shows that, not the folder the workspace was opened in. Branch is `git_branch_for` of that directory. `on_pwd_changed` in `window.rs` must still call `refresh_workspace_location`. Upstream's "skip if cwd unchanged" / `try_borrow` is fine around that call. An idle defer is how the fork avoids borrowing `state` re-entrantly; keep a path that refreshes the card after the cwd write.
 
+### Terminal middle button
+
+`terminal.rs` handles middle-button holds with a GTK drag gesture. Send scroll
+deltas through the normal Ghostty scroll path, not middle-button events, which
+would paste the selection. Keep this limited to terminal panes.
+
 ### OSC 7501 and Ghostty
 
 Submodule pin on the fork: `9f647e126082f93ba36b0d03f282f3fd5f4a8769` from `mattmartinez/ghostty`, branch `osc7501-program-status`. Four commits on upstream's pin `9fb2c115` (still upstream's pin as of `cfc090c`; upstream had not moved Ghostty):

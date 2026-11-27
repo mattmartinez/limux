@@ -8,6 +8,7 @@ Fork-specific changes relative to [upstream](https://github.com/am-will/limux) a
 
 ## Log
 
+- **2026-11-27 — Scroll the terminal on middle-button hold** · files: `rust/limux-host-linux/src/terminal.rs`, `.github/workflows/rust-quality.yml`, `README.md`, `fork/CODEMAP.md` · kind: edits-upstream · why: scroll existing output without pasting selected text into the active shell · upstream-risk: low
 - **2026-11-27 — Keep release packaging off the PR path** · files: `.github/workflows/` (`release-linux.yml`, `release-rpm.yml`, `rust-quality.yml`), `fork/` (`CODEMAP.md`, `README.md`), `docs/releasing.md` · kind: edits-upstream · why: keep PR checks focused on Rust and the live GTK host, cancel superseded PR runs, and leave other distribution builds available on release or on demand · upstream-risk: low
 - **2026-11-27 — Remove AUR publishing and validation from the personal fork** · files: `.github/workflows/aur-publish.yml`, `PKGBUILD*.template`, `scripts/` (AUR renderers/tests, `check.sh`, `tests/test-ghostty-provenance.sh`), `fork/` (`CODEMAP.md`, `README.md`, `sync-upstream.sh`), `README.md`, `CLAUDE.md`, `docs/releasing.md` · kind: edits-upstream · why: the fork installs `limux-card` locally and does not publish or validate upstream AUR packages · upstream-risk: conflicts-likely
 - **2026-11-27 — Fix Clippy in the omp snapshot regression test** · files: `rust/limux-cli/src/session_snapshot.rs` · kind: edits-upstream · why: pass the file-reader function directly to the generic snapshot helper · upstream-risk: low

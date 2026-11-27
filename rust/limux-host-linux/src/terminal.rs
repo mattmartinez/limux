@@ -3172,6 +3172,9 @@ pub fn create_terminal(
         let motion_for_press = motion_coalescer.clone();
         click.connect_pressed(move |gesture, _n, x, y| {
             let btn = gesture.current_button();
+            if btn == 2 {
+                return;
+            }
             // Grab keyboard focus on any click
             request_terminal_focus(&gl_for_focus, &had_focus);
             // Skip right-click — context menu handles it
@@ -3181,7 +3184,6 @@ pub fn create_terminal(
             if let Some(surface) = *sc.borrow() {
                 let button = match btn {
                     1 => GHOSTTY_MOUSE_LEFT,
-                    2 => GHOSTTY_MOUSE_MIDDLE,
                     _ => GHOSTTY_MOUSE_UNKNOWN,
                 };
                 let mods = translate_mouse_mods(gesture.current_event_state());
@@ -3196,13 +3198,12 @@ pub fn create_terminal(
         let motion_for_release = motion_coalescer.clone();
         click.connect_released(move |gesture, _n, x, y| {
             let btn = gesture.current_button();
-            if btn == 3 {
+            if btn == 2 || btn == 3 {
                 return;
             }
             if let Some(surface) = *sc2.borrow() {
                 let button = match btn {
                     1 => GHOSTTY_MOUSE_LEFT,
-                    2 => GHOSTTY_MOUSE_MIDDLE,
                     _ => GHOSTTY_MOUSE_UNKNOWN,
                 };
                 let mods = translate_mouse_mods(gesture.current_event_state());
@@ -3215,6 +3216,67 @@ pub fn create_terminal(
         });
         controllers.borrow_mut().push(click.clone().upcast());
         gl_area.add_controller(click);
+    }
+
+    // Middle-button autoscroll. Do not forward the button to Ghostty: that
+    // would paste the selection. Send normal scroll deltas while it is held.
+    {
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(2);
+        let tick = Rc::new(Cell::new(None::<gtk::TickCallbackId>));
+        drag.connect_drag_end({
+            let tick = tick.clone();
+            move |_, _, _| {
+                if let Some(id) = tick.take() {
+                    id.remove();
+                }
+            }
+        });
+        let gl_area_weak = gl_area.downgrade();
+        let surface_cell = surface_cell.clone();
+        let motion = motion_coalescer.clone();
+        let had_focus = had_focus.clone();
+        drag.connect_drag_begin(move |drag, _, _| {
+            if drag.current_button() != 2 {
+                return;
+            }
+            let Some(area) = gl_area_weak.upgrade() else {
+                return;
+            };
+            request_terminal_focus(&area, &had_focus);
+            let drag = drag.downgrade();
+            let surface_cell = surface_cell.clone();
+            let motion = motion.clone();
+            let last_frame = Cell::new(None);
+            tick.set(Some(area.add_tick_callback(move |area, clock| {
+                let (Some(surface), Some((_, dy))) = (
+                    *surface_cell.borrow(),
+                    drag.upgrade().and_then(|drag| drag.offset()),
+                ) else {
+                    return glib::ControlFlow::Break;
+                };
+                let now = clock.frame_time();
+                let previous = last_frame.replace(Some(now)).unwrap_or(now);
+                // Ignore hand jitter near the anchor and cap both the speed
+                // and the amount applied after a stalled frame.
+                let distance = (dy.abs() - 8.0).clamp(0.0, 240.0);
+                let seconds = (now - previous).clamp(0, 50_000) as f64 / 1_000_000.0;
+                if distance > 0.0 && seconds > 0.0 {
+                    motion.flush_to_surface(surface);
+                    let (x, y, mods) = encode_terminal_scroll(
+                        0.0,
+                        distance.copysign(dy) * 6.0 * seconds,
+                        area.scale_factor(),
+                        gtk::gdk::ScrollUnit::Surface,
+                        true,
+                    );
+                    unsafe { ghostty_surface_mouse_scroll(surface, x, y, mods) };
+                }
+                glib::ControlFlow::Continue
+            })));
+        });
+        controllers.borrow_mut().push(drag.clone().upcast());
+        gl_area.add_controller(drag);
     }
 
     // Right-click context menu
@@ -4012,6 +4074,108 @@ mod tests {
         });
         assert_eq!(text(display.clipboard()).as_deref(), Some("caf\u{fffd}"));
 
+        terminal.handle.shutdown();
+        window.close();
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 display, xdotool, and Ghostty resources"]
+    fn middle_button_hold_scrolls_without_pasting() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("ghostty");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("config"),
+            "shell-integration = none\ncopy-on-select = true\nmiddle-click-action = primary-paste\n",
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", temp.path());
+        crate::prepare_ghostty_runtime();
+        gtk::init().expect("X11 display required");
+        init_ghostty();
+
+        let terminal = create_terminal(
+            Some("/tmp"),
+            TerminalOptions {
+                startup_command: Some(
+                    "/bin/sh -c 'stty raw -echo; i=0; while [ \"$i\" -lt 120 ]; do printf \"ROW%03d\\r\\n\" \"$i\"; i=$((i+1)); done; printf BOTTOM; exec cat'"
+                        .to_string(),
+                ),
+                ..TerminalOptions::default()
+            },
+            TerminalCallbacks::disconnected(),
+        );
+        let window = gtk::Window::builder()
+            .title("Limux middle button regression")
+            .default_width(640)
+            .default_height(480)
+            .decorated(false)
+            .child(&terminal.root)
+            .build();
+        window.present();
+        let display = gtk::prelude::WidgetExt::display(&window);
+        display.primary_clipboard().set_text("UNEXPECTED_PASTE");
+        display.clipboard().set_text("UNEXPECTED_PASTE");
+        let screen = || terminal.handle.read_viewport_text().unwrap_or_default();
+        let iterate = || {
+            glib::MainContext::default().iteration(false);
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let wait_for = |label: &str, until: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !until() {
+                assert!(Instant::now() < deadline, "{label}: {:?}", screen());
+                iterate();
+            }
+        };
+        let pump = |millis| {
+            let deadline = Instant::now() + Duration::from_millis(millis);
+            while Instant::now() < deadline {
+                iterate();
+            }
+        };
+        let xdotool = |args: &[&str]| {
+            let result = std::process::Command::new("xdotool")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{args:?}: {:?}", result.stderr);
+            String::from_utf8(result.stdout).unwrap().trim().to_owned()
+        };
+
+        let at_bottom = || screen().trim_end().ends_with("BOTTOM");
+        wait_for("terminal output", &at_bottom);
+        let id = xdotool(&[
+            "search",
+            "--onlyvisible",
+            "--name",
+            "^Limux middle button regression$",
+        ]);
+        wait_for("terminal allocation", &|| {
+            terminal.handle.gl_area.height() >= 400 && terminal.handle.gl_area.width() >= 600
+        });
+        xdotool(&["windowfocus", "--sync", &id]);
+        xdotool(&["mousemove", "--window", &id, "300", "220"]);
+        xdotool(&["mousedown", "2"]);
+        pump(150);
+        assert!(at_bottom(), "holding still must not scroll or paste");
+        xdotool(&["mousemove", "--window", &id, "300", "100"]);
+        wait_for("scroll up into history", &|| !screen().contains("BOTTOM"));
+        let first = screen();
+        wait_for("keep scrolling with the pointer held still", &|| {
+            screen() != first
+        });
+        xdotool(&["mouseup", "2"]);
+        pump(50);
+        let released = screen();
+        pump(150);
+        assert_eq!(screen(), released, "scrolling must stop on release");
+
+        xdotool(&["mousemove", "--window", &id, "300", "220"]);
+        xdotool(&["mousedown", "2"]);
+        xdotool(&["mousemove", "--window", &id, "300", "360"]);
+        wait_for("scroll down without pasting", &at_bottom);
+        xdotool(&["mouseup", "2"]);
         terminal.handle.shutdown();
         window.close();
     }

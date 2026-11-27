@@ -184,6 +184,19 @@ jobs:
       - name: Check terminal directory inheritance
         run: uv run scripts/ci-native-crashes.py run -- ./scripts/tests/test-terminal-cwd.sh
 
+      - name: Check middle-button terminal scrolling
+        env:
+          GDK_BACKEND: x11
+          GDK_SCALE: "1"
+          GTK_A11Y: none
+          GIO_USE_VFS: local
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ghostty/zig-out/lib
+          GHOSTTY_RESOURCES_DIR: ${{ github.workspace }}/ghostty/zig-out/share/ghostty
+        run: |
+          xvfb-run -a dbus-run-session -- cargo test --locked -p limux-host-linux \
+            terminal::tests::middle_button_hold_scrolls_without_pasting -- --ignored --exact
+
       - name: Check tab double-click rename
         run: uv run scripts/ci-native-crashes.py run -- ./scripts/tests/test-tab-rename.sh
 
