@@ -10,6 +10,8 @@ that generated file documents the runtime agent message protocol.
 
 Read [`fork/CODEMAP.md`](fork/CODEMAP.md) before editing a file both sides have touched, and before any upstream sync. It is the keep-list. [`fork/README.md`](fork/README.md) is the short version. Do not drop this section when `AGENTS.md` conflicts; put it back.
 
+Log each intentional change relative to upstream in [`DIVERGENCE.md`](DIVERGENCE.md), newest first. Include the affected paths, reason, and merge risk. The log records what changed; the CODEMAP explains what to preserve during a sync.
+
 Upstream merge, in order:
 
 1. Do not rebase, `reset` onto upstream, or force-push `main`. Merge. Land the result as a PR onto this fork's `main`, not as a PR to `am-will/limux`. The `card-status` branch is the only one meant for an upstream PR, and it must not include `fork/` or the Ghostty pin move.
